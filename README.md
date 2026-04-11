@@ -62,6 +62,20 @@ const recent = await mindPalace.search({
   limit: 10
 });
 
+// Get related thoughts (auto-retrieval)
+const related = await mindPalace.getRelatedThoughts(thought);
+const formatted = mindPalace.formatRelatedThoughts(related, 'summary');
+console.log(formatted);
+
+// Analyze similar thoughts for patterns and suggestions
+const analysis = await mindPalace.analyzeSimilarThoughts(thought);
+console.log('Patterns:', analysis.patterns);
+console.log('Suggestions:', analysis.suggestions);
+
+// Get compression statistics
+const stats = await mindPalace.getCompressionStats();
+console.log(`Storage: ${stats.estimatedSize} → ${stats.estimatedCompressed}`);
+
 // Execute CLI command
 const output = await mindPalace.executeCommand(
   '!mindpalace -k "optimization" --confidence ">0.8"'

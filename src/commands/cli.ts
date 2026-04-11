@@ -2,6 +2,8 @@ import { SearchAPI } from '../search/search';
 import { ThoughtCapturer } from '../capture/capturer';
 import { getConfigManager } from '../config/config';
 import { getStorageManager } from '../storage/store';
+import { AutoRetrieval } from '../retrieval/auto-retrieval';
+import { CompressionManager } from '../storage/compression-manager';
 import { MindPalaceConfig, SearchResult, CaptureOptions } from '../types';
 
 /**
@@ -36,7 +38,7 @@ export class CLICommandHandler {
       }
 
       if (args.stats) {
-        return await this.handleStats();
+        return await this.handleStats(args);
       }
 
       if (args.clear) {
@@ -318,12 +320,12 @@ ${thought.metadata.tags.length > 0 ? `Tags:       ${thought.metadata.tags.join('
   /**
    * Handle stats command
    */
-  private static async handleStats(): Promise<string> {
+  private static async handleStats(args: Record<string, any>): Promise<string> {
     const stats = await SearchAPI.getStatistics();
     const storage = getStorageManager();
     const total = await storage.count();
 
-    return `
+    let output = `
 📊 Mind Palace Statistics
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
 Total Thoughts:        ${total}
@@ -351,8 +353,25 @@ ${Object.entries(stats.topDomains)
       .sort(([, a], [, b]) => (b as number) - (a as number))
       .slice(0, 5)
       .map(([domain, count]) => `  ${domain}: ${count}`)
-      .join('\n') || '  None'}
-    `.trim();
+      .join('\n') || '  None'}`;
+
+    // Add compression stats if requested
+    if (args['--compression']) {
+      try {
+        const compressionStats = await CompressionManager.estimateStorageUsage();
+        output += `
+
+💾 Storage & Compression
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+Estimated Size:        ${CompressionManager.formatBytes(compressionStats.estimatedSize)}
+With Compression:      ${CompressionManager.formatBytes(compressionStats.estimatedCompressed)}
+Potential Savings:     ${CompressionManager.formatBytes(compressionStats.savings)}`;
+      } catch (error) {
+        // Compression stats not available
+      }
+    }
+
+    return output.trim();
   }
 
   /**
@@ -428,9 +447,18 @@ CONFIG:
   !mindpalace --config                          # Show all config
   !mindpalace --config autoCapture=false        # Set value
 
-STATS:
+STATS & STORAGE:
   !mindpalace --stats                           # Show statistics
+  !mindpalace --stats --compression             # Include compression stats
   !mindpalace --help                            # Show this help
+
+AUTO-RETRIEVAL:
+  Related thoughts are automatically found when auto-retrieval is enabled.
+  Toggle: clawbot config mind-palace.autoRetrieval.enabled true|false
+
+COMPRESSION:
+  Older thoughts are automatically compressed based on age.
+  Compression setting: clawbot config mind-palace.storage.compression lz4|gzip|none
     `.trim();
   }
 }

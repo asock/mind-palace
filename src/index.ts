@@ -8,6 +8,8 @@ import { getConfigManager, ConfigManager } from './config/config';
 import { ThoughtCapturer } from './capture/capturer';
 import { SearchAPI } from './search/search';
 import { CLICommandHandler } from './commands/cli';
+import { AutoRetrieval } from './retrieval/auto-retrieval';
+import { CompressionManager } from './storage/compression-manager';
 import * as types from './types';
 
 /**
@@ -113,6 +115,67 @@ export class MindPalace {
   }
 
   /**
+   * Get related thoughts with auto-retrieval
+   */
+  public async getRelatedThoughts(thought: types.Thought): Promise<types.Thought[]> {
+    await this.initialize();
+    const allThoughts = await this.storage.getAllThoughts(10000, 0);
+    return AutoRetrieval.getRelatedThoughts(thought, allThoughts);
+  }
+
+  /**
+   * Format related thoughts for display
+   */
+  public formatRelatedThoughts(
+    thoughts: types.Thought[],
+    mode: 'full' | 'summary' | 'brief' = 'summary'
+  ): string {
+    return AutoRetrieval.formatRelatedThoughts(thoughts, mode);
+  }
+
+  /**
+   * Analyze similar thoughts and get suggestions
+   */
+  public async analyzeSimilarThoughts(
+    thought: types.Thought
+  ): Promise<{
+    similar: types.Thought[];
+    patterns: string[];
+    suggestions: string[];
+  }> {
+    await this.initialize();
+    const allThoughts = await this.storage.getAllThoughts(10000, 0);
+    return AutoRetrieval.analyzeSimilarThoughts(thought, allThoughts);
+  }
+
+  /**
+   * Get compression statistics
+   */
+  public async getCompressionStats(): Promise<{
+    thoughts: number;
+    estimatedSize: string;
+    estimatedCompressed: string;
+    savings: string;
+  }> {
+    await this.initialize();
+    const stats = await CompressionManager.estimateStorageUsage();
+    return {
+      thoughts: stats.thoughts,
+      estimatedSize: CompressionManager.formatBytes(stats.estimatedSize),
+      estimatedCompressed: CompressionManager.formatBytes(stats.estimatedCompressed),
+      savings: CompressionManager.formatBytes(stats.savings),
+    };
+  }
+
+  /**
+   * Manually trigger batch compression
+   */
+  public async compressOldThoughts(): Promise<{ compressed: number; freed: number }> {
+    await this.initialize();
+    return CompressionManager.compressOldThoughts();
+  }
+
+  /**
    * Count total thoughts
    */
   public async count(): Promise<number> {
@@ -135,12 +198,17 @@ export { ConfigManager } from './config/config';
 export { ThoughtCapturer };
 export { SearchAPI };
 export { CLICommandHandler };
+export { AutoRetrieval };
+export { CompressionManager };
 
 // Export search engines
 export { KeywordSearchEngine } from './search/keyword';
 export { TemporalSearchEngine } from './search/temporal';
 export { FilterSearchEngine } from './search/filters';
 export { SemanticSearchEngine } from './search/semantic';
+
+// Export compression utilities
+export { compress, decompress } from './storage/compression';
 
 // Export singleton instance
 export const mindPalace = new MindPalace();
