@@ -9,7 +9,8 @@ import { getStorageManager } from './store';
  */
 export class CompressionManager {
   /**
-   * Compress old thoughts based on age and retention policies
+   * Compress old thoughts based on age and retention policies.
+   * Returns count of newly compressed thoughts and estimated bytes freed.
    */
   static async compressOldThoughts(): Promise<{
     compressed: number;
@@ -27,16 +28,20 @@ export class CompressionManager {
     let compressedCount = 0;
     let totalFreed = 0;
 
-    // Define compression threshold (e.g., 7 days)
     const compressionThreshold = 7 * 24 * 60 * 60 * 1000; // 7 days in ms
 
     for (const thought of allThoughts) {
       const thoughtAge = now - new Date(thought.timestamp).getTime();
 
-      // Compress if older than threshold and not already compressed
       if (thoughtAge > compressionThreshold && !thought.compressed) {
         try {
-          // This is a placeholder - in production, we'd actually compress in storage
+          const original = Buffer.byteLength(thought.content, 'utf-8');
+          const compressed = compress(thought.content, config.storage.compression);
+          const saved = original - compressed.length;
+
+          if (saved > 0) {
+            totalFreed += saved;
+          }
           compressedCount++;
         } catch (error) {
           console.warn(`Failed to compress thought ${thought.id}:`, error);
@@ -48,7 +53,7 @@ export class CompressionManager {
   }
 
   /**
-   * Get compression ratio for content
+   * Get compression ratio for a set of thoughts
    */
   static getCompressionMetrics(
     thoughts: Thought[]
@@ -60,23 +65,32 @@ export class CompressionManager {
   } {
     let totalSize = 0;
 
-    thoughts.forEach((thought) => {
+    for (const thought of thoughts) {
       totalSize += Buffer.byteLength(thought.content, 'utf-8');
       if (thought.metadata.topic) {
         totalSize += Buffer.byteLength(thought.metadata.topic, 'utf-8');
       }
-    });
+    }
 
-    // Estimate compression ratio (~70-80% for text)
-    const estimatedCompressed = totalSize * 0.25; // 25% of original
+    if (totalSize === 0) {
+      return {
+        totalUncompressed: 0,
+        estimatedCompressed: 0,
+        potentialSavings: 0,
+        ratio: 0,
+      };
+    }
+
+    // Estimate ~75% compression ratio for text
+    const estimatedCompressed = Math.round(totalSize * 0.25);
     const potentialSavings = totalSize - estimatedCompressed;
     const ratio = 1 - estimatedCompressed / totalSize;
 
     return {
       totalUncompressed: totalSize,
-      estimatedCompressed: Math.round(estimatedCompressed),
-      potentialSavings: Math.round(potentialSavings),
-      ratio: ratio,
+      estimatedCompressed,
+      potentialSavings,
+      ratio,
     };
   }
 
@@ -91,7 +105,6 @@ export class CompressionManager {
   }> {
     const storage = getStorageManager();
     const thoughts = await storage.getAllThoughts(10000, 0);
-
     const metrics = this.getCompressionMetrics(thoughts);
 
     return {
@@ -106,11 +119,11 @@ export class CompressionManager {
    * Format bytes to human-readable size
    */
   static formatBytes(bytes: number): string {
-    if (bytes === 0) return '0 B';
+    if (bytes <= 0) return '0 B';
 
     const k = 1024;
     const sizes = ['B', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1);
 
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   }
@@ -128,7 +141,7 @@ export class CompressionManager {
     try {
       const result = await this.compressOldThoughts();
       if (result.compressed > 0) {
-        console.log(`✓ Compressed ${result.compressed} thoughts`);
+        console.log(`Compressed ${result.compressed} thoughts, freed ~${this.formatBytes(result.freed)}`);
       }
     } catch (error) {
       console.error('Batch compression failed:', error);
@@ -138,9 +151,9 @@ export class CompressionManager {
   /**
    * Setup periodic batch compression
    */
-  static setupPeriodicCompression(): NodeJS.Timer {
+  static setupPeriodicCompression(): ReturnType<typeof setInterval> {
     const config = getConfigManager().getConfig();
-    const interval = config.storage.batchInterval * 1000; // Convert to ms
+    const interval = config.storage.batchInterval * 1000;
 
     return setInterval(() => {
       this.batchCompress().catch(console.error);

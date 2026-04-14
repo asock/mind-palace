@@ -7,7 +7,7 @@ import {
   ThoughtCapturer,
   SearchAPI,
   CLICommandHandler,
-} from '../dist/index';
+} from '../src/index';
 
 async function main() {
   // Initialize Mind Palace

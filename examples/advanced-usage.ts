@@ -7,7 +7,7 @@ import {
   mindPalace,
   AutoRetrieval,
   CompressionManager,
-} from '../dist/index';
+} from '../src/index';
 
 async function main() {
   console.log('🧠 Mind Palace - Advanced Features Demo\n');
