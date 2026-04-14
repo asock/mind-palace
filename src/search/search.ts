@@ -150,7 +150,6 @@ export class SearchAPI {
             break;
 
           case 'limit':
-          case 'limit':
             options.limit = parseInt(value);
             break;
 
@@ -180,21 +179,21 @@ export class SearchAPI {
   }
 
   /**
-   * Parse confidence range (e.g., ">0.8", "0.5-0.9")
+   * Parse confidence range (e.g., ">0.8", "0.5-0.9", ">=0.8")
    */
   private static parseConfidenceRange(value: string, options: SearchOptions): void {
-    if (value.includes('-')) {
+    if (value.includes('-') && !value.startsWith('>') && !value.startsWith('<')) {
       const [min, max] = value.split('-').map((v) => parseFloat(v.trim()));
       options.minConfidence = min;
       options.maxConfidence = max;
-    } else if (value.startsWith('>')) {
-      options.minConfidence = parseFloat(value.substring(1));
-    } else if (value.startsWith('<')) {
-      options.maxConfidence = parseFloat(value.substring(1));
     } else if (value.startsWith('>=')) {
       options.minConfidence = parseFloat(value.substring(2));
     } else if (value.startsWith('<=')) {
       options.maxConfidence = parseFloat(value.substring(2));
+    } else if (value.startsWith('>')) {
+      options.minConfidence = parseFloat(value.substring(1));
+    } else if (value.startsWith('<')) {
+      options.maxConfidence = parseFloat(value.substring(1));
     }
   }
 

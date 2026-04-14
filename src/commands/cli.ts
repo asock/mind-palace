@@ -2,9 +2,8 @@ import { SearchAPI } from '../search/search';
 import { ThoughtCapturer } from '../capture/capturer';
 import { getConfigManager } from '../config/config';
 import { getStorageManager } from '../storage/store';
-import { AutoRetrieval } from '../retrieval/auto-retrieval';
 import { CompressionManager } from '../storage/compression-manager';
-import { MindPalaceConfig, SearchResult, CaptureOptions } from '../types';
+import { SearchResult } from '../types';
 
 /**
  * CLI command handler for Mind Palace
@@ -13,23 +12,16 @@ import { MindPalaceConfig, SearchResult, CaptureOptions } from '../types';
 export class CLICommandHandler {
   /**
    * Parse and execute mindpalace command
-   * Examples:
-   *   !mindpalace -k "database optimization"
-   *   !mindpalace -s "efficient memory management"
-   *   !mindpalace -t "2026-04-01 to 2026-04-11"
-   *   !mindpalace -recent 10
-   *   !mindpalace --capture "My thought here"
    */
   static async execute(commandString: string): Promise<string> {
     try {
       const args = this.parseArguments(commandString);
 
-      // Handle different commands
       if (args.capture) {
         return await this.handleCapture(args);
       }
 
-      if (args.config) {
+      if (args.config !== undefined) {
         return this.handleConfig(args);
       }
 
@@ -53,6 +45,13 @@ export class CLICommandHandler {
   }
 
   /**
+   * Strip surrounding quotes from a string
+   */
+  private static stripQuotes(s: string): string {
+    return s.replace(/^["']|["']$/g, '');
+  }
+
+  /**
    * Parse command arguments
    */
   private static parseArguments(commandString: string): Record<string, any> {
@@ -73,14 +72,13 @@ export class CLICommandHandler {
     while (i < parts.length) {
       const part = parts[i];
 
-      // Flag-based arguments
       if (part === '--capture' || part === '-c') {
         args.capture = this.joinQuotedArgs(parts, ++i);
         break;
       }
 
       if (part === '--config') {
-        args.config = this.joinQuotedArgs(parts, ++i);
+        args.config = this.joinQuotedArgs(parts, ++i) || '';
         break;
       }
 
@@ -96,30 +94,34 @@ export class CLICommandHandler {
         continue;
       }
 
+      if (part === '--compression') {
+        args.compression = true;
+        i++;
+        continue;
+      }
+
       if (part === '--clear') {
         args.clear = true;
         i++;
         continue;
       }
 
-      // Search flags
       if (part === '-k' || part === '--keyword') {
-        args.keyword = parts[++i];
+        args.keyword = this.stripQuotes(parts[++i] || '');
         i++;
         continue;
       }
 
       if (part === '-s' || part === '--semantic') {
-        args.semantic = parts[++i];
+        args.semantic = this.stripQuotes(parts[++i] || '');
         i++;
         continue;
       }
 
       if (part === '-t' || part === '--time') {
-        // Handle multi-part time ranges
-        let timeRange = parts[++i];
+        let timeRange = this.stripQuotes(parts[++i] || '');
         while (i + 1 < parts.length && !parts[i + 1].startsWith('-')) {
-          timeRange += ' ' + parts[++i];
+          timeRange += ' ' + this.stripQuotes(parts[++i]);
         }
         args.time = timeRange;
         i++;
@@ -127,31 +129,31 @@ export class CLICommandHandler {
       }
 
       if (part === '--tag' || part === '--tags') {
-        args.tags = parts[++i]?.split(',') || [];
+        args.tags = this.stripQuotes(parts[++i] || '').split(',').filter(Boolean);
         i++;
         continue;
       }
 
       if (part === '--confidence' || part === '--conf') {
-        args.confidence = parts[++i];
+        args.confidence = this.stripQuotes(parts[++i] || '');
         i++;
         continue;
       }
 
       if (part === '--category' || part === '--cat') {
-        args.category = parts[++i];
+        args.category = this.stripQuotes(parts[++i] || '');
         i++;
         continue;
       }
 
       if (part === '--domain') {
-        args.domain = parts[++i];
+        args.domain = this.stripQuotes(parts[++i] || '');
         i++;
         continue;
       }
 
       if (part === '--related') {
-        args.relatedTo = parts[++i];
+        args.relatedTo = this.stripQuotes(parts[++i] || '');
         i++;
         continue;
       }
@@ -163,19 +165,19 @@ export class CLICommandHandler {
       }
 
       if (part === '--limit') {
-        args.limit = parseInt(parts[++i]);
+        args.limit = parseInt(parts[++i] || '10');
         i++;
         continue;
       }
 
       if (part === '--offset') {
-        args.offset = parseInt(parts[++i]);
+        args.offset = parseInt(parts[++i] || '0');
         i++;
         continue;
       }
 
       if (part === '--sort') {
-        args.sort = parts[++i];
+        args.sort = this.stripQuotes(parts[++i] || '');
         i++;
         continue;
       }
@@ -190,14 +192,14 @@ export class CLICommandHandler {
    * Join quoted arguments
    */
   private static joinQuotedArgs(parts: string[], startIndex: number): string {
-    const args: string[] = [];
+    const collected: string[] = [];
 
     for (let i = startIndex; i < parts.length; i++) {
       if (parts[i].startsWith('-')) break;
-      args.push(parts[i].replace(/^["']|["']$/g, ''));
+      collected.push(this.stripQuotes(parts[i]));
     }
 
-    return args.join(' ');
+    return collected.join(' ');
   }
 
   /**
@@ -205,9 +207,7 @@ export class CLICommandHandler {
    */
   private static async handleSearch(args: Record<string, any>): Promise<string> {
     const storage = getStorageManager();
-    const config = getConfigManager().getConfig();
 
-    // Build search options
     const searchOptions: any = {
       keyword: args.keyword,
       semantic: args.semantic,
@@ -221,7 +221,8 @@ export class CLICommandHandler {
 
     // Handle time range
     if (args.time) {
-      const parsed = require('../search/temporal').TemporalSearchEngine.parseTimeRange(args.time);
+      const { TemporalSearchEngine } = require('../search/temporal');
+      const parsed = TemporalSearchEngine.parseTimeRange(args.time);
       if (parsed) {
         searchOptions.timeRange = parsed;
       }
@@ -230,26 +231,34 @@ export class CLICommandHandler {
     // Handle recent
     if (args.recent) {
       const thoughts = await storage.getAllThoughts(args.recent, 0);
-      return this.formatResults(thoughts, args.recent, 0);
+      return this.formatResults(thoughts, thoughts.length, 0);
     }
 
-    // Handle confidence range
+    // Handle confidence range — check >= / <= before > / <
     if (args.confidence) {
-      // Simple parsing of confidence
-      const match = args.confidence.match(/(>|<|>=|<=)?(.+)/);
+      const confStr = args.confidence;
+      const match = confStr.match(/^(>=|<=|>|<)?(.+)/);
       if (match) {
-        const op = match[1];
+        const op = match[1] || '';
         const val = parseFloat(match[2]);
 
-        if (op === '>' || op === '>=') {
-          searchOptions.minConfidence = val;
-        } else if (op === '<' || op === '<=') {
-          searchOptions.maxConfidence = val;
+        if (!isNaN(val)) {
+          if (op === '>=' || op === '>') {
+            searchOptions.minConfidence = val;
+          } else if (op === '<=' || op === '<') {
+            searchOptions.maxConfidence = val;
+          } else {
+            searchOptions.minConfidence = val;
+          }
         }
       }
     }
 
-    // Execute search
+    // Handle category filter
+    if (args.category) {
+      searchOptions.category = args.category;
+    }
+
     const results = await SearchAPI.search(searchOptions);
 
     return this.formatResults(
@@ -285,36 +294,32 @@ ${thought.metadata.tags.length > 0 ? `Tags:       ${thought.metadata.tags.join('
     const configMgr = getConfigManager();
     const config = configMgr.getConfig();
 
-    const configStr = args.config;
+    const configStr: string = args.config;
     if (!configStr) {
       return JSON.stringify(config, null, 2);
     }
 
-    // Parse "key=value" or "key.nested=value"
-    const [path, value] = configStr.split('=');
-    const cleanPath = path.trim();
-    const cleanValue = value?.trim();
-
-    if (!cleanValue) {
+    const eqIndex = configStr.indexOf('=');
+    if (eqIndex === -1) {
+      const cleanPath = configStr.trim();
       return `Config: ${cleanPath}\n${JSON.stringify(this.getNestedValue(config, cleanPath), null, 2)}`;
     }
 
-    // Parse value
+    const cleanPath = configStr.substring(0, eqIndex).trim();
+    const cleanValue = configStr.substring(eqIndex + 1).trim();
+
     let parsedValue: any = cleanValue;
     if (cleanValue === 'true') parsedValue = true;
-    if (cleanValue === 'false') parsedValue = false;
-    if (!isNaN(Number(cleanValue))) parsedValue = Number(cleanValue);
+    else if (cleanValue === 'false') parsedValue = false;
+    else if (cleanValue !== '' && !isNaN(Number(cleanValue))) parsedValue = Number(cleanValue);
 
     configMgr.updateNested(cleanPath, parsedValue);
 
     return `✓ Configuration updated: ${cleanPath} = ${parsedValue}`;
   }
 
-  /**
-   * Get nested value from config
-   */
-  private static getNestedValue(obj: any, path: string): any {
-    return path.split('.').reduce((current, key) => current?.[key], obj);
+  private static getNestedValue(obj: any, dotPath: string): any {
+    return dotPath.split('.').reduce((current, key) => current?.[key], obj);
   }
 
   /**
@@ -355,8 +360,7 @@ ${Object.entries(stats.topDomains)
       .map(([domain, count]) => `  ${domain}: ${count}`)
       .join('\n') || '  None'}`;
 
-    // Add compression stats if requested
-    if (args['--compression']) {
+    if (args.compression) {
       try {
         const compressionStats = await CompressionManager.estimateStorageUsage();
         output += `
@@ -366,7 +370,7 @@ ${Object.entries(stats.topDomains)
 Estimated Size:        ${CompressionManager.formatBytes(compressionStats.estimatedSize)}
 With Compression:      ${CompressionManager.formatBytes(compressionStats.estimatedCompressed)}
 Potential Savings:     ${CompressionManager.formatBytes(compressionStats.savings)}`;
-      } catch (error) {
+      } catch {
         // Compression stats not available
       }
     }
@@ -374,9 +378,6 @@ Potential Savings:     ${CompressionManager.formatBytes(compressionStats.savings
     return output.trim();
   }
 
-  /**
-   * Handle clear command
-   */
   private static async handleClear(): Promise<string> {
     return `⚠️ Clear command not yet implemented. Please manually delete the data directory.`;
   }
@@ -406,16 +407,13 @@ Potential Savings:     ${CompressionManager.formatBytes(compressionStats.savings
     Date: ${new Date(thought.timestamp).toLocaleString()}
     Category: ${thought.metadata.category} | Confidence: ${(thought.metadata.confidence * 100).toFixed(0)}%
     ${thought.metadata.tags.length > 0 ? `Tags: ${thought.metadata.tags.join(', ')}` : ''}
-    Preview: ${thought.content.substring(0, 100)}...
+    Preview: ${thought.content.substring(0, 100)}${thought.content.length > 100 ? '...' : ''}
       `;
     });
 
     return output.trim();
   }
 
-  /**
-   * Get help message
-   */
   private static getHelpMessage(): string {
     return `
 🧠 Mind Palace - Command Reference

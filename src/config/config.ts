@@ -2,14 +2,46 @@ import fs from 'fs';
 import path from 'path';
 import { MindPalaceConfig, DEFAULT_CONFIG } from '../types';
 
+/**
+ * Deep merge two objects. Source values override target values.
+ * Only merges plain objects, not arrays.
+ */
+function deepMerge<T extends Record<string, any>>(target: T, source: Partial<T>): T {
+  const result = { ...target };
+
+  for (const key of Object.keys(source) as Array<keyof T>) {
+    const sourceVal = source[key];
+    const targetVal = target[key];
+
+    if (
+      sourceVal !== null &&
+      typeof sourceVal === 'object' &&
+      !Array.isArray(sourceVal) &&
+      targetVal !== null &&
+      typeof targetVal === 'object' &&
+      !Array.isArray(targetVal)
+    ) {
+      (result as any)[key] = deepMerge(targetVal as any, sourceVal as any);
+    } else if (sourceVal !== undefined) {
+      (result as any)[key] = sourceVal;
+    }
+  }
+
+  return result;
+}
+
 export class ConfigManager {
   private configDir: string;
   private configPath: string;
   private config: MindPalaceConfig;
 
-  constructor() {
-    const home = process.env.HOME || process.env.USERPROFILE || '/root';
-    this.configDir = path.join(home, '.clawbot', 'mind-palace');
+  constructor(storageDir?: string) {
+    if (storageDir) {
+      this.configDir = storageDir;
+    } else {
+      const home = process.env.HOME || process.env.USERPROFILE || '/root';
+      this.configDir = path.join(home, '.clawbot', 'mind-palace');
+    }
     this.configPath = path.join(this.configDir, 'config.json');
     this.config = this.loadConfig();
   }
@@ -24,7 +56,7 @@ export class ConfigManager {
   }
 
   /**
-   * Load config from file, or create default if not exists
+   * Load config from file with deep merge against defaults
    */
   private loadConfig(): MindPalaceConfig {
     this.ensureDir();
@@ -32,50 +64,52 @@ export class ConfigManager {
     if (fs.existsSync(this.configPath)) {
       try {
         const data = fs.readFileSync(this.configPath, 'utf-8');
-        return { ...DEFAULT_CONFIG, ...JSON.parse(data) };
+        const saved = JSON.parse(data);
+        return deepMerge(DEFAULT_CONFIG, saved);
       } catch (error) {
         console.warn(`Failed to load config: ${error}. Using defaults.`);
-        return { ...DEFAULT_CONFIG };
+        return deepMerge({} as MindPalaceConfig, DEFAULT_CONFIG);
       }
     }
 
     // Create default config file
-    this.saveConfig(DEFAULT_CONFIG);
-    return { ...DEFAULT_CONFIG };
+    const config = deepMerge({} as MindPalaceConfig, DEFAULT_CONFIG);
+    this.saveConfig(config);
+    return config;
   }
 
   /**
    * Get current config
    */
   public getConfig(): MindPalaceConfig {
-    return { ...this.config };
+    return deepMerge({} as MindPalaceConfig, this.config);
   }
 
   /**
-   * Update specific config values
+   * Update specific config values (deep merge)
    */
   public update(updates: Partial<MindPalaceConfig>): void {
-    this.config = { ...this.config, ...updates };
+    this.config = deepMerge(this.config, updates);
     this.saveConfig(this.config);
   }
 
   /**
-   * Update nested config value
+   * Update nested config value by dot-path
    */
-  public updateNested(path: string, value: any): void {
-    const keys = path.split('.');
-    let obj = this.config;
+  public updateNested(dotPath: string, value: any): void {
+    const keys = dotPath.split('.');
+    let obj: any = this.config;
 
     for (let i = 0; i < keys.length - 1; i++) {
-      const key = keys[i] as keyof typeof obj;
+      const key = keys[i];
       if (!(key in obj)) {
-        (obj as any)[key] = {};
+        obj[key] = {};
       }
-      obj = (obj as any)[key];
+      obj = obj[key];
     }
 
     const lastKey = keys[keys.length - 1];
-    (obj as any)[lastKey] = value;
+    obj[lastKey] = value;
 
     this.saveConfig(this.config);
   }
@@ -92,7 +126,7 @@ export class ConfigManager {
    * Reset to defaults
    */
   public reset(): void {
-    this.config = { ...DEFAULT_CONFIG };
+    this.config = deepMerge({} as MindPalaceConfig, DEFAULT_CONFIG);
     this.saveConfig(this.config);
   }
 
@@ -121,5 +155,13 @@ export function getConfigManager(): ConfigManager {
   if (!configManager) {
     configManager = new ConfigManager();
   }
+  return configManager;
+}
+
+/**
+ * Reset config manager (for testing)
+ */
+export function resetConfigManager(storageDir?: string): ConfigManager {
+  configManager = new ConfigManager(storageDir);
   return configManager;
 }

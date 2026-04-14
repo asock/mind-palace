@@ -193,8 +193,8 @@ export class MindPalace {
 
 // Export types
 export * from './types';
-export { StorageManager } from './storage/store';
-export { ConfigManager } from './config/config';
+export { StorageManager, resetStorageManager } from './storage/store';
+export { ConfigManager, resetConfigManager } from './config/config';
 export { ThoughtCapturer };
 export { SearchAPI };
 export { CLICommandHandler };

@@ -1,7 +1,4 @@
-import fs from 'fs';
-import path from 'path';
 import { Thought, SearchResult } from '../types';
-import { getConfigManager } from '../config/config';
 
 /**
  * Keyword search engine for Mind Palace
