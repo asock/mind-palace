@@ -10,6 +10,7 @@ import { SearchAPI } from './search/search';
 import { CLICommandHandler } from './commands/cli';
 import { AutoRetrieval } from './retrieval/auto-retrieval';
 import { CompressionManager } from './storage/compression-manager';
+import { OperationsManager } from './storage/operations';
 import * as types from './types';
 
 /**
@@ -19,6 +20,7 @@ export class MindPalace {
   private storage: StorageManager;
   private config: ConfigManager;
   private initialized: boolean = false;
+  private compressionInterval: NodeJS.Timeout | null = null;
 
   constructor() {
     this.storage = getStorageManager();
@@ -31,6 +33,10 @@ export class MindPalace {
   public async initialize(): Promise<void> {
     if (this.initialized) return;
     await this.storage.initialize();
+
+    // Start periodic compression
+    this.compressionInterval = CompressionManager.setupPeriodicCompression();
+
     this.initialized = true;
   }
 
@@ -184,9 +190,64 @@ export class MindPalace {
   }
 
   /**
+   * Compact the JSONL log (remove superseded versions).
+   */
+  public async compact(): Promise<ReturnType<typeof OperationsManager.compactJSONL>> {
+    await this.initialize();
+    return OperationsManager.compactJSONL();
+  }
+
+  /**
+   * Write a SHA-256 manifest of all storage files.
+   */
+  public async writeManifest(): Promise<ReturnType<typeof OperationsManager.writeBackupManifest>> {
+    await this.initialize();
+    return OperationsManager.writeBackupManifest();
+  }
+
+  /**
+   * Verify storage files against a manifest.
+   */
+  public async verifyManifest(manifestPath?: string): Promise<
+    Array<{ file: string; expected: string; actual: string | null }>
+  > {
+    await this.initialize();
+    return OperationsManager.verifyBackupManifest(manifestPath);
+  }
+
+  /**
+   * Collect observability metrics snapshot.
+   */
+  public async metrics(): Promise<ReturnType<typeof OperationsManager.collectMetrics>> {
+    await this.initialize();
+    return OperationsManager.collectMetrics();
+  }
+
+  /**
+   * Backfill embeddings for thoughts missing them.
+   */
+  public async backfillEmbeddings(): Promise<number> {
+    await this.initialize();
+    return this.storage.backfillEmbeddings();
+  }
+
+  /**
+   * Rebuild the SQLite index from the JSONL source of truth.
+   * Use this to recover from a corrupted or deleted DB file.
+   */
+  public async rebuildIndex(): Promise<number> {
+    await this.initialize();
+    return this.storage.rebuildIndex();
+  }
+
+  /**
    * Close Mind Palace
    */
   public close(): void {
+    if (this.compressionInterval) {
+      clearInterval(this.compressionInterval);
+      this.compressionInterval = null;
+    }
     this.storage.close();
   }
 }
@@ -200,6 +261,7 @@ export { SearchAPI };
 export { CLICommandHandler };
 export { AutoRetrieval };
 export { CompressionManager };
+export { OperationsManager };
 
 // Export search engines
 export { KeywordSearchEngine } from './search/keyword';
@@ -209,6 +271,26 @@ export { SemanticSearchEngine } from './search/semantic';
 
 // Export compression utilities
 export { compress, decompress } from './storage/compression';
+
+// Export encryption utilities (v2.1)
+export { encrypt, decrypt, getEncryptionKey } from './storage/encryption';
+
+// Export validation utilities (v2.1)
+export { safeParseThought, validateThought, isSafeObject } from './storage/validation';
+
+// Export embedding utilities (v0.3)
+export { embed, cosineSimilarity, tokenize } from './search/embeddings';
+
+// Export structured logger (v0.4)
+export { logger } from './logger';
+export type { LogLevel } from './logger';
+
+// Export HTTP server (v1.1)
+export { startServer } from './server/http';
+export type { ServerOptions, ServerHandle } from './server/http';
+
+// Export graceful shutdown (v1.3)
+export { installShutdownHandlers } from './shutdown';
 
 // Export singleton instance
 export const mindPalace = new MindPalace();

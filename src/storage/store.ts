@@ -1,10 +1,14 @@
 import fs from 'fs';
+import readline from 'readline';
 import path from 'path';
 import sqlite3 from 'sqlite3';
 import { v4 as uuidv4 } from 'uuid';
 import { Thought, CaptureOptions, ThoughtMetadata, DEFAULT_CONFIG } from '../types';
 import { compress, decompress, shouldCompress } from './compression';
 import { getConfigManager } from '../config/config';
+import { safeParseThought } from './validation';
+import { encrypt, decrypt, getEncryptionKey } from './encryption';
+import { embed, vectorToBuffer, bufferToVector, cosineSimilarity, DEFAULT_DIMENSION } from '../search/embeddings';
 
 /**
  * Storage manager for Mind Palace
@@ -25,15 +29,38 @@ export class StorageManager {
   }
 
   /**
-   * Initialize storage (create tables, indexes)
+   * Initialize storage (create tables, indexes).
+   * Enables WAL mode for concurrent readers and faster writes.
    */
   public async initialize(): Promise<void> {
     if (this.initialized) return;
 
     await this.ensureDir();
     this.db = new sqlite3.Database(this.dbPath);
+    await this.applyPragmas();
     await this.createTables();
     this.initialized = true;
+  }
+
+  /**
+   * Apply performance pragmas. WAL mode allows concurrent reads during writes
+   * and batches fsyncs; NORMAL synchronous is safe with WAL.
+   */
+  private async applyPragmas(): Promise<void> {
+    const db = this.getDb();
+    const pragmas = [
+      'PRAGMA journal_mode = WAL',
+      'PRAGMA synchronous = NORMAL',
+      'PRAGMA temp_store = MEMORY',
+      'PRAGMA foreign_keys = ON',
+      'PRAGMA cache_size = -20000', // 20 MiB page cache
+    ];
+
+    for (const pragma of pragmas) {
+      await new Promise<void>((resolve, reject) => {
+        db.run(pragma, (err) => (err ? reject(err) : resolve()));
+      });
+    }
   }
 
   private getDb(): sqlite3.Database {
@@ -44,12 +71,12 @@ export class StorageManager {
   }
 
   /**
-   * Ensure storage directory exists
+   * Ensure storage directory exists with proper permissions
    */
   private async ensureDir(): Promise<void> {
     return new Promise((resolve, reject) => {
       if (!fs.existsSync(this.storageDir)) {
-        fs.mkdir(this.storageDir, { recursive: true }, (err) => {
+        fs.mkdir(this.storageDir, { recursive: true, mode: 0o700 }, (err) => {
           if (err) reject(err);
           else resolve();
         });
@@ -128,7 +155,9 @@ export class StorageManager {
   }
 
   /**
-   * Capture a new thought
+   * Capture a new thought with transactional safety.
+   * SQLite index is committed first; if JSONL append fails, the index entry
+   * is rolled back to keep storage consistent.
    */
   public async capture(
     content: string,
@@ -162,23 +191,289 @@ export class StorageManager {
       version: 1,
     };
 
-    await this.saveToJSONL(thought);
+    // Index first, then write to JSONL. Rollback index if JSONL fails.
     await this.indexThought(thought);
+    try {
+      await this.saveToJSONL(thought);
+      await this.storeEmbedding(id, content).catch((err) =>
+        console.warn(`Failed to store embedding for ${id}:`, err)
+      );
+      if (options.references && options.references.length > 0) {
+        await this.storeReferences(id, options.references).catch((err) =>
+          console.warn(`Failed to store references for ${id}:`, err)
+        );
+      }
+    } catch (jsonlErr) {
+      await this.deleteThoughtIndex(id).catch((err) =>
+        console.error(`Failed to rollback index for ${id}:`, err)
+      );
+      throw jsonlErr;
+    }
 
     return thought;
   }
 
   /**
-   * Save thought to JSONL file
+   * Store embedding vector for a thought in SQLite BLOB table.
    */
-  private async saveToJSONL(thought: Thought): Promise<void> {
+  public async storeEmbedding(thoughtId: string, content: string): Promise<void> {
+    const db = this.getDb();
+    const vec = embed(content, DEFAULT_DIMENSION);
+    const buf = vectorToBuffer(vec);
+
     return new Promise((resolve, reject) => {
-      const jsonLine = JSON.stringify(thought) + '\n';
-      fs.appendFile(this.jsonlPath, jsonLine, (err) => {
+      db.run(
+        `INSERT OR REPLACE INTO thought_embeddings (thought_id, embedding) VALUES (?, ?)`,
+        [thoughtId, buf],
+        (err) => {
+          if (err) reject(err);
+          else resolve();
+        }
+      );
+    });
+  }
+
+  /**
+   * Store references (forward links) between thoughts for thinking chains.
+   */
+  public async storeReferences(sourceId: string, targetIds: string[]): Promise<void> {
+    const db = this.getDb();
+
+    return new Promise((resolve, reject) => {
+      let completed = 0;
+      let error: Error | null = null;
+      if (targetIds.length === 0) return resolve();
+
+      for (const targetId of targetIds) {
+        db.run(
+          `INSERT OR IGNORE INTO thought_references (source_id, target_id) VALUES (?, ?)`,
+          [sourceId, targetId],
+          (err: Error | null) => {
+            if (err && !error) error = err;
+            completed++;
+            if (completed === targetIds.length) {
+              if (error) reject(error);
+              else resolve();
+            }
+          }
+        );
+      }
+    });
+  }
+
+  /**
+   * Get all thought IDs referenced by a source thought (forward chain).
+   */
+  public async getReferences(sourceId: string): Promise<string[]> {
+    const db = this.getDb();
+    return new Promise((resolve, reject) => {
+      db.all(
+        `SELECT target_id FROM thought_references WHERE source_id = ?`,
+        [sourceId],
+        (err, rows: any[]) => {
+          if (err) reject(err);
+          else resolve((rows || []).map((r) => r.target_id));
+        }
+      );
+    });
+  }
+
+  /**
+   * Get all thought IDs that reference the target (backward chain / backlinks).
+   */
+  public async getBacklinks(targetId: string): Promise<string[]> {
+    const db = this.getDb();
+    return new Promise((resolve, reject) => {
+      db.all(
+        `SELECT source_id FROM thought_references WHERE target_id = ?`,
+        [targetId],
+        (err, rows: any[]) => {
+          if (err) reject(err);
+          else resolve((rows || []).map((r) => r.source_id));
+        }
+      );
+    });
+  }
+
+  /**
+   * Vector similarity search using stored embeddings.
+   * Returns thought IDs ranked by cosine similarity (highest first).
+   */
+  public async vectorSearch(
+    queryText: string,
+    topK: number = 10
+  ): Promise<Array<{ id: string; score: number }>> {
+    const db = this.getDb();
+    const queryVec = embed(queryText, DEFAULT_DIMENSION);
+
+    const rows: Array<{ thought_id: string; embedding: Buffer }> = await new Promise(
+      (resolve, reject) => {
+        db.all(
+          `SELECT thought_id, embedding FROM thought_embeddings`,
+          (err, rows: any[]) => {
+            if (err) reject(err);
+            else resolve(rows || []);
+          }
+        );
+      }
+    );
+
+    const scored = rows
+      .map((row) => ({
+        id: row.thought_id,
+        score: cosineSimilarity(queryVec, bufferToVector(row.embedding)),
+      }))
+      .filter((r) => r.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, Math.max(1, topK));
+
+    return scored;
+  }
+
+  /**
+   * Delete thought index entries (used for transaction rollback)
+   */
+  private async deleteThoughtIndex(id: string): Promise<void> {
+    const db = this.getDb();
+
+    return new Promise((resolve, reject) => {
+      db.run(`DELETE FROM thoughts WHERE id = ?`, [id], (err) => {
         if (err) reject(err);
         else resolve();
       });
     });
+  }
+
+  /**
+   * Rebuild the SQLite index from the JSONL source-of-truth log.
+   * Use this to recover from a corrupted or deleted DB file.
+   * Returns the number of thoughts re-indexed.
+   */
+  public async rebuildIndex(): Promise<number> {
+    const db = this.getDb();
+
+    await new Promise<void>((resolve, reject) => {
+      db.serialize(() => {
+        db.run('DELETE FROM thought_tags');
+        db.run('DELETE FROM thought_references');
+        db.run('DELETE FROM thought_embeddings');
+        db.run('DELETE FROM thoughts', (err) => (err ? reject(err) : resolve()));
+      });
+    });
+
+    const thoughts = await this.readAllFromJSONL();
+    // Last-write-wins: latest entry per id
+    const latest = new Map<string, Thought>();
+    for (const t of thoughts) {
+      latest.set(t.id, this.maybeDecryptThought(t));
+    }
+
+    let reindexed = 0;
+    for (const thought of latest.values()) {
+      await this.indexThought(thought);
+      if (!thought.compressed && !thought.encrypted) {
+        await this.storeEmbedding(thought.id, thought.content).catch(() => {});
+      }
+      reindexed++;
+    }
+
+    return reindexed;
+  }
+
+  /**
+   * Generate and persist embeddings for any thoughts missing them.
+   * Useful after enabling vector search or importing external data.
+   */
+  public async backfillEmbeddings(): Promise<number> {
+    const db = this.getDb();
+
+    const existingIds: Set<string> = await new Promise((resolve, reject) => {
+      db.all(`SELECT thought_id FROM thought_embeddings`, (err, rows: any[]) => {
+        if (err) reject(err);
+        else resolve(new Set((rows || []).map((r) => r.thought_id)));
+      });
+    });
+
+    const thoughts = await this.getAllThoughts(100000, 0);
+    let indexed = 0;
+
+    for (const thought of thoughts) {
+      if (existingIds.has(thought.id)) continue;
+      if (thought.compressed || thought.encrypted) continue;
+      await this.storeEmbedding(thought.id, thought.content);
+      indexed++;
+    }
+
+    return indexed;
+  }
+
+  /**
+   * Save thought to JSONL file (encrypts content if enabled).
+   */
+  private async saveToJSONL(thought: Thought): Promise<void> {
+    const toPersist = this.maybeEncryptThought(thought);
+    return new Promise((resolve, reject) => {
+      const jsonLine = JSON.stringify(toPersist) + '\n';
+      fs.appendFile(this.jsonlPath, jsonLine, { mode: 0o600 }, (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+  }
+
+  /**
+   * Encrypt thought.content if encryption is enabled.
+   * Marks the thought with `encrypted: true` so decryption is symmetric.
+   */
+  private maybeEncryptThought(thought: Thought): Thought {
+    const config = getConfigManager().getConfig();
+    if (!config.storage.encryption || thought.encrypted) return thought;
+
+    try {
+      const key = getEncryptionKey(this.storageDir);
+      return { ...thought, content: encrypt(thought.content, key), encrypted: true };
+    } catch (error) {
+      console.error(`Failed to encrypt thought ${thought.id}:`, error);
+      return thought;
+    }
+  }
+
+  /**
+   * Decrypt thought.content if it was stored encrypted.
+   */
+  private maybeDecryptThought(thought: Thought): Thought {
+    if (!thought.encrypted) return thought;
+
+    try {
+      const key = getEncryptionKey(this.storageDir);
+      return { ...thought, content: decrypt(thought.content, key), encrypted: false };
+    } catch (error) {
+      console.error(`Failed to decrypt thought ${thought.id}:`, error);
+      return thought;
+    }
+  }
+
+  /**
+   * Stream JSONL file line-by-line. Yields validated Thought objects.
+   * Use this instead of readAllFromJSONL when memory efficiency matters.
+   */
+  public async *streamThoughts(): AsyncGenerator<Thought, void, void> {
+    if (!fs.existsSync(this.jsonlPath)) return;
+
+    const stream = fs.createReadStream(this.jsonlPath, { encoding: 'utf-8' });
+    const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+
+    try {
+      for await (const line of rl) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        const thought = safeParseThought(trimmed);
+        if (thought) yield this.maybeDecryptThought(thought);
+      }
+    } finally {
+      rl.close();
+      stream.close();
+    }
   }
 
   /**
@@ -275,11 +570,16 @@ export class StorageManager {
   }
 
   /**
-   * Get thought by ID - reads from JSONL
+   * Get thought by ID - reads from JSONL.
+   * Returns the LATEST version (last write wins for append-only updates).
    */
   public async getThought(id: string): Promise<Thought | null> {
     const thoughts = await this.readAllFromJSONL();
-    return thoughts.find((t) => t.id === id) || null;
+    let latest: Thought | null = null;
+    for (const t of thoughts) {
+      if (t.id === id) latest = t;
+    }
+    return latest;
   }
 
   /**
@@ -304,14 +604,20 @@ export class StorageManager {
 
         const thoughts: Thought[] = [];
         const lines = data.split('\n');
-        for (const line of lines) {
-          const trimmed = line.trim();
+        let invalidCount = 0;
+        for (let i = 0; i < lines.length; i++) {
+          const trimmed = lines[i].trim();
           if (!trimmed) continue;
-          try {
-            thoughts.push(JSON.parse(trimmed));
-          } catch {
-            // Invalid JSON line, skip
+          const thought = safeParseThought(trimmed);
+          if (thought) {
+            thoughts.push(this.maybeDecryptThought(thought));
+          } else {
+            invalidCount++;
+            console.warn(`Invalid/unsafe JSONL line ${i + 1} skipped`);
           }
+        }
+        if (invalidCount > 0) {
+          console.warn(`Total invalid JSONL lines skipped: ${invalidCount}/${lines.length}`);
         }
 
         resolve(thoughts);
@@ -419,11 +725,113 @@ export class StorageManager {
   }
 
   /**
+   * Update an existing thought. Appends a new version to JSONL (append-only log)
+   * and updates the SQLite index. Readers return the latest version.
+   */
+  public async updateThought(thought: Thought): Promise<void> {
+    await this.saveToJSONL(thought);
+    await this.updateThoughtIndex(thought);
+  }
+
+  /**
+   * Update only the SQLite index entry for a thought.
+   */
+  private async updateThoughtIndex(thought: Thought): Promise<void> {
+    const db = this.getDb();
+
+    return new Promise((resolve, reject) => {
+      const {
+        id,
+        timestamp,
+        metadata: {
+          topic,
+          confidence,
+          category,
+          emotionalTone,
+          tags,
+          modelVersion,
+          inputLength,
+          outputLength,
+        },
+        source,
+        compressed,
+        version,
+      } = thought;
+
+      const tagsString = JSON.stringify(tags);
+
+      db.run(
+        `UPDATE thoughts SET
+          timestamp = ?, topic = ?, confidence = ?, category = ?,
+          emotionalTone = ?, tags = ?, domain = ?, modelVersion = ?,
+          inputLength = ?, outputLength = ?, compressed = ?, version = ?
+         WHERE id = ?`,
+        [
+          timestamp,
+          topic,
+          confidence,
+          category,
+          emotionalTone,
+          tagsString,
+          source?.domain,
+          modelVersion,
+          inputLength,
+          outputLength,
+          compressed ? 1 : 0,
+          version,
+          id,
+        ],
+        (err: Error | null) => {
+          if (err) reject(err);
+          else resolve();
+        }
+      );
+    });
+  }
+
+  /**
+   * Update thought content (for compression/decompression)
+   */
+  public async updateThoughtContent(id: string, content: string): Promise<void> {
+    const thought = await this.getThought(id);
+    if (!thought) throw new Error(`Thought ${id} not found`);
+
+    thought.content = content;
+    await this.saveToJSONL(thought);
+    await this.updateThought(thought);
+  }
+
+  /**
+   * Delete a thought from both the SQLite index and the JSONL file.
+   * JSONL is rewritten without the target thought.
+   */
+  public async deleteThought(id: string): Promise<void> {
+    await this.deleteThoughtIndex(id);
+
+    if (!fs.existsSync(this.jsonlPath)) return;
+
+    const thoughts = await this.readAllFromJSONL();
+    const remaining = thoughts.filter((t) => t.id !== id);
+    const serialized = remaining.map((t) => JSON.stringify(t)).join('\n') + (remaining.length ? '\n' : '');
+
+    return new Promise((resolve, reject) => {
+      fs.writeFile(this.jsonlPath, serialized, { mode: 0o600 }, (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+  }
+
+  /**
    * Close database connection
    */
   public close(): void {
     if (this.db) {
-      this.db.close();
+      this.db.close((err) => {
+        if (err) {
+          console.error('Error closing database:', err);
+        }
+      });
       this.db = null;
     }
     this.initialized = false;

@@ -10,7 +10,7 @@ import { getStorageManager } from './store';
 export class CompressionManager {
   /**
    * Compress old thoughts based on age and retention policies.
-   * Returns count of newly compressed thoughts and estimated bytes freed.
+   * Returns count of newly compressed thoughts and actual bytes freed.
    */
   static async compressOldThoughts(): Promise<{
     compressed: number;
@@ -36,13 +36,19 @@ export class CompressionManager {
       if (thoughtAge > compressionThreshold && !thought.compressed) {
         try {
           const original = Buffer.byteLength(thought.content, 'utf-8');
-          const compressed = compress(thought.content, config.storage.compression);
-          const saved = original - compressed.length;
+          const compressedBuffer = compress(thought.content, config.storage.compression);
+          const compressedSize = compressedBuffer.length;
+          const saved = original - compressedSize;
 
           if (saved > 0) {
+            // Compress and persist the thought
+            thought.compressed = true;
+            thought.content = compressedBuffer.toString('base64');
+            await storage.updateThought(thought);
             totalFreed += saved;
+            compressedCount++;
+            console.log(`Compressed thought ${thought.id}: ${original} → ${compressedSize} bytes`);
           }
-          compressedCount++;
         } catch (error) {
           console.warn(`Failed to compress thought ${thought.id}:`, error);
         }
@@ -157,7 +163,71 @@ export class CompressionManager {
 
     return setInterval(() => {
       this.batchCompress().catch(console.error);
+      this.enforceRetention().catch(console.error);
     }, interval);
+  }
+
+  /**
+   * Enforce retention policies (archiving and pruning).
+   * Reads retention config and applies archiveAfter + pruneLowConfidence policies.
+   */
+  static async enforceRetention(): Promise<{
+    pruned: number;
+    archived: number;
+  }> {
+    const config = getConfigManager().getConfig();
+    const storage = getStorageManager();
+
+    if (!config.retention.enabled) {
+      return { pruned: 0, archived: 0 };
+    }
+
+    const allThoughts = await storage.getAllThoughts(10000, 0);
+    const now = Date.now();
+    const archiveAfterMs = config.retention.archiveAfter * 1000;
+    let pruned = 0;
+    let archived = 0;
+
+    for (const thought of allThoughts) {
+      const age = now - new Date(thought.timestamp).getTime();
+
+      // Prune low-confidence thoughts past retention age
+      if (
+        config.retention.pruneLowConfidence &&
+        age > archiveAfterMs &&
+        thought.metadata.confidence < 0.3
+      ) {
+        try {
+          await storage.deleteThought(thought.id);
+          pruned++;
+          console.log(
+            `Pruned low-confidence thought ${thought.id} (age: ${Math.round(age / 86400000)}d, conf: ${thought.metadata.confidence})`
+          );
+        } catch (error) {
+          console.warn(`Failed to prune thought ${thought.id}:`, error);
+        }
+        continue;
+      }
+
+      // Archive old thoughts (compress + mark)
+      if (age > archiveAfterMs && !thought.compressed && config.storage.compression !== 'none') {
+        try {
+          const compressed = compress(thought.content, config.storage.compression);
+          thought.compressed = true;
+          thought.content = compressed.toString('base64');
+          await storage.updateThought(thought);
+          archived++;
+        } catch (error) {
+          console.warn(`Failed to archive thought ${thought.id}:`, error);
+        }
+      }
+    }
+
+    if (pruned > 0 || archived > 0) {
+      console.log(`Retention enforcement: pruned ${pruned}, archived ${archived}`);
+    }
+
+    return { pruned, archived };
   }
 }
 

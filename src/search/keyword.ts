@@ -117,7 +117,8 @@ export class KeywordSearchEngine {
     let highlighted = content;
 
     for (const keyword of keywords) {
-      const regex = new RegExp(`(${keyword})`, 'gi');
+      const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(`(${escaped})`, 'gi');
       highlighted = highlighted.replace(regex, '**$1**');
     }
 
