@@ -19,6 +19,7 @@ export class MindPalace {
   private storage: StorageManager;
   private config: ConfigManager;
   private initialized: boolean = false;
+  private compressionInterval: NodeJS.Timeout | null = null;
 
   constructor() {
     this.storage = getStorageManager();
@@ -31,6 +32,10 @@ export class MindPalace {
   public async initialize(): Promise<void> {
     if (this.initialized) return;
     await this.storage.initialize();
+
+    // Start periodic compression
+    this.compressionInterval = CompressionManager.setupPeriodicCompression();
+
     this.initialized = true;
   }
 
@@ -187,6 +192,10 @@ export class MindPalace {
    * Close Mind Palace
    */
   public close(): void {
+    if (this.compressionInterval) {
+      clearInterval(this.compressionInterval);
+      this.compressionInterval = null;
+    }
     this.storage.close();
   }
 }

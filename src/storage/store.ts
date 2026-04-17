@@ -44,12 +44,12 @@ export class StorageManager {
   }
 
   /**
-   * Ensure storage directory exists
+   * Ensure storage directory exists with proper permissions
    */
   private async ensureDir(): Promise<void> {
     return new Promise((resolve, reject) => {
       if (!fs.existsSync(this.storageDir)) {
-        fs.mkdir(this.storageDir, { recursive: true }, (err) => {
+        fs.mkdir(this.storageDir, { recursive: true, mode: 0o700 }, (err) => {
           if (err) reject(err);
           else resolve();
         });
@@ -304,14 +304,21 @@ export class StorageManager {
 
         const thoughts: Thought[] = [];
         const lines = data.split('\n');
-        for (const line of lines) {
-          const trimmed = line.trim();
+        let invalidCount = 0;
+        for (let i = 0; i < lines.length; i++) {
+          const trimmed = lines[i].trim();
           if (!trimmed) continue;
           try {
             thoughts.push(JSON.parse(trimmed));
-          } catch {
-            // Invalid JSON line, skip
+          } catch (error) {
+            invalidCount++;
+            console.warn(
+              `Failed to parse JSONL line ${i + 1}: ${error instanceof Error ? error.message : String(error)}`
+            );
           }
+        }
+        if (invalidCount > 0) {
+          console.warn(`Total invalid JSONL lines skipped: ${invalidCount}/${lines.length}`);
         }
 
         resolve(thoughts);
@@ -419,11 +426,83 @@ export class StorageManager {
   }
 
   /**
+   * Update an existing thought (for compression, etc.)
+   */
+  public async updateThought(thought: Thought): Promise<void> {
+    const db = this.getDb();
+
+    return new Promise((resolve, reject) => {
+      const {
+        id,
+        timestamp,
+        metadata: {
+          topic,
+          confidence,
+          category,
+          emotionalTone,
+          tags,
+          modelVersion,
+          inputLength,
+          outputLength,
+        },
+        source,
+        compressed,
+        version,
+      } = thought;
+
+      const tagsString = JSON.stringify(tags);
+
+      db.run(
+        `UPDATE thoughts SET
+          timestamp = ?, topic = ?, confidence = ?, category = ?,
+          emotionalTone = ?, tags = ?, domain = ?, modelVersion = ?,
+          inputLength = ?, outputLength = ?, compressed = ?, version = ?
+         WHERE id = ?`,
+        [
+          timestamp,
+          topic,
+          confidence,
+          category,
+          emotionalTone,
+          tagsString,
+          source?.domain,
+          modelVersion,
+          inputLength,
+          outputLength,
+          compressed ? 1 : 0,
+          version,
+          id,
+        ],
+        (err: Error | null) => {
+          if (err) reject(err);
+          else resolve();
+        }
+      );
+    });
+  }
+
+  /**
+   * Update thought content (for compression/decompression)
+   */
+  public async updateThoughtContent(id: string, content: string): Promise<void> {
+    const thought = await this.getThought(id);
+    if (!thought) throw new Error(`Thought ${id} not found`);
+
+    thought.content = content;
+    await this.saveToJSONL(thought);
+    await this.updateThought(thought);
+  }
+
+  /**
    * Close database connection
    */
   public close(): void {
     if (this.db) {
-      this.db.close();
+      this.db.close((err) => {
+        if (err) {
+          console.error('Error closing database:', err);
+        }
+      });
       this.db = null;
     }
     this.initialized = false;

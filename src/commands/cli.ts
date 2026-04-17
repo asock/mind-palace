@@ -1,3 +1,5 @@
+import fs from 'fs';
+import path from 'path';
 import { SearchAPI } from '../search/search';
 import { ThoughtCapturer } from '../capture/capturer';
 import { getConfigManager } from '../config/config';
@@ -107,77 +109,79 @@ export class CLICommandHandler {
       }
 
       if (part === '-k' || part === '--keyword') {
-        args.keyword = this.stripQuotes(parts[++i] || '');
+        if (i + 1 < parts.length) args.keyword = this.stripQuotes(parts[++i] || '');
         i++;
         continue;
       }
 
       if (part === '-s' || part === '--semantic') {
-        args.semantic = this.stripQuotes(parts[++i] || '');
+        if (i + 1 < parts.length) args.semantic = this.stripQuotes(parts[++i] || '');
         i++;
         continue;
       }
 
       if (part === '-t' || part === '--time') {
-        let timeRange = this.stripQuotes(parts[++i] || '');
-        while (i + 1 < parts.length && !parts[i + 1].startsWith('-')) {
-          timeRange += ' ' + this.stripQuotes(parts[++i]);
+        if (i + 1 < parts.length) {
+          let timeRange = this.stripQuotes(parts[++i] || '');
+          while (i + 1 < parts.length && !parts[i + 1].startsWith('-')) {
+            timeRange += ' ' + this.stripQuotes(parts[++i]);
+          }
+          args.time = timeRange;
         }
-        args.time = timeRange;
         i++;
         continue;
       }
 
       if (part === '--tag' || part === '--tags') {
-        args.tags = this.stripQuotes(parts[++i] || '').split(',').filter(Boolean);
+        if (i + 1 < parts.length) args.tags = this.stripQuotes(parts[++i] || '').split(',').filter(Boolean);
         i++;
         continue;
       }
 
       if (part === '--confidence' || part === '--conf') {
-        args.confidence = this.stripQuotes(parts[++i] || '');
+        if (i + 1 < parts.length) args.confidence = this.stripQuotes(parts[++i] || '');
         i++;
         continue;
       }
 
       if (part === '--category' || part === '--cat') {
-        args.category = this.stripQuotes(parts[++i] || '');
+        if (i + 1 < parts.length) args.category = this.stripQuotes(parts[++i] || '');
         i++;
         continue;
       }
 
       if (part === '--domain') {
-        args.domain = this.stripQuotes(parts[++i] || '');
+        if (i + 1 < parts.length) args.domain = this.stripQuotes(parts[++i] || '');
         i++;
         continue;
       }
 
       if (part === '--related') {
-        args.relatedTo = this.stripQuotes(parts[++i] || '');
+        if (i + 1 < parts.length) args.relatedTo = this.stripQuotes(parts[++i] || '');
         i++;
         continue;
       }
 
       if (part === '--recent') {
-        args.recent = parseInt(parts[++i] || '10');
+        if (i + 1 < parts.length) args.recent = parseInt(parts[++i] || '10');
         i++;
         continue;
       }
 
       if (part === '--limit') {
-        args.limit = parseInt(parts[++i] || '10');
+        if (i + 1 < parts.length) args.limit = parseInt(parts[++i] || '10');
         i++;
         continue;
       }
 
       if (part === '--offset') {
-        args.offset = parseInt(parts[++i] || '0');
+        if (i + 1 < parts.length) args.offset = parseInt(parts[++i] || '0');
         i++;
         continue;
       }
 
       if (part === '--sort') {
-        args.sort = this.stripQuotes(parts[++i] || '');
+        if (i + 1 < parts.length) args.sort = this.stripQuotes(parts[++i] || '');
         i++;
         continue;
       }
@@ -302,11 +306,19 @@ ${thought.metadata.tags.length > 0 ? `Tags:       ${thought.metadata.tags.join('
     const eqIndex = configStr.indexOf('=');
     if (eqIndex === -1) {
       const cleanPath = configStr.trim();
-      return `Config: ${cleanPath}\n${JSON.stringify(this.getNestedValue(config, cleanPath), null, 2)}`;
+      try {
+        return `Config: ${cleanPath}\n${JSON.stringify(this.getNestedValue(config, cleanPath), null, 2)}`;
+      } catch (err) {
+        return `❌ Error: ${err instanceof Error ? err.message : 'Invalid config path'}`;
+      }
     }
 
     const cleanPath = configStr.substring(0, eqIndex).trim();
     const cleanValue = configStr.substring(eqIndex + 1).trim();
+
+    if (!this.isAllowedConfigPath(cleanPath)) {
+      return `❌ Config path not allowed: ${cleanPath}`;
+    }
 
     let parsedValue: any = cleanValue;
     if (cleanValue === 'true') parsedValue = true;
@@ -318,7 +330,35 @@ ${thought.metadata.tags.length > 0 ? `Tags:       ${thought.metadata.tags.join('
     return `✓ Configuration updated: ${cleanPath} = ${parsedValue}`;
   }
 
+  /**
+   * Whitelist of allowed config paths
+   */
+  private static readonly ALLOWED_CONFIG_PATHS = [
+    'autoCapture',
+    'autoRetrieval.enabled',
+    'autoRetrieval.threshold',
+    'autoRetrieval.maxResults',
+    'autoRetrieval.displayMode',
+    'storage.compression',
+    'storage.batchInterval',
+    'search.enableVectorSearch',
+    'search.semanticSensitivity',
+  ];
+
+  /**
+   * Validate that a config path is allowed
+   */
+  private static isAllowedConfigPath(dotPath: string): boolean {
+    const normalized = dotPath.trim().toLowerCase();
+    return this.ALLOWED_CONFIG_PATHS.some(allowed =>
+      allowed.toLowerCase() === normalized
+    );
+  }
+
   private static getNestedValue(obj: any, dotPath: string): any {
+    if (!this.isAllowedConfigPath(dotPath)) {
+      throw new Error(`Config path not allowed: ${dotPath}`);
+    }
     return dotPath.split('.').reduce((current, key) => current?.[key], obj);
   }
 
@@ -379,7 +419,37 @@ Potential Savings:     ${CompressionManager.formatBytes(compressionStats.savings
   }
 
   private static async handleClear(): Promise<string> {
-    return `⚠️ Clear command not yet implemented. Please manually delete the data directory.`;
+    const storage = getStorageManager();
+    const config = getConfigManager();
+    const storageDir = config.getStorageDir();
+
+    try {
+      // Close the database before deleting
+      storage.close();
+
+      // Delete all thoughts from database (cascade delete via foreign keys)
+      const db = storage['getDb']?.() || null;
+      if (db) {
+        await new Promise<void>((resolve, reject) => {
+          db.run('DELETE FROM thoughts', (err) => {
+            if (err) reject(err);
+            else resolve();
+          });
+        });
+      }
+
+      // Clear JSONL file
+      if (fs.existsSync(path.join(storageDir, 'thoughts.jsonl'))) {
+        fs.writeFileSync(path.join(storageDir, 'thoughts.jsonl'), '', { mode: 0o600 });
+      }
+
+      // Reinitialize storage for future use
+      await storage.initialize();
+
+      return '✅ Mind Palace cleared. All thoughts have been deleted.';
+    } catch (error) {
+      return `❌ Failed to clear Mind Palace: ${error instanceof Error ? error.message : 'Unknown error'}`;
+    }
   }
 
   /**

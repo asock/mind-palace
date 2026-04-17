@@ -18,6 +18,20 @@ export class SearchAPI {
     const storage = getStorageManager();
     const config = getConfigManager().getConfig();
 
+    // Validate input bounds
+    if (options.limit !== undefined) {
+      options.limit = Math.max(1, Math.min(10000, options.limit));
+    }
+    if (options.offset !== undefined) {
+      options.offset = Math.max(0, options.offset);
+    }
+    if (options.minConfidence !== undefined) {
+      options.minConfidence = Math.max(0, Math.min(1, options.minConfidence));
+    }
+    if (options.maxConfidence !== undefined) {
+      options.maxConfidence = Math.max(0, Math.min(1, options.maxConfidence));
+    }
+
     // Get all thoughts
     const allThoughts = await storage.getAllThoughts(10000, 0);
 
@@ -184,16 +198,20 @@ export class SearchAPI {
   private static parseConfidenceRange(value: string, options: SearchOptions): void {
     if (value.includes('-') && !value.startsWith('>') && !value.startsWith('<')) {
       const [min, max] = value.split('-').map((v) => parseFloat(v.trim()));
-      options.minConfidence = min;
-      options.maxConfidence = max;
+      if (!isNaN(min)) options.minConfidence = Math.max(0, Math.min(1, min));
+      if (!isNaN(max)) options.maxConfidence = Math.max(0, Math.min(1, max));
     } else if (value.startsWith('>=')) {
-      options.minConfidence = parseFloat(value.substring(2));
+      const val = parseFloat(value.substring(2));
+      if (!isNaN(val)) options.minConfidence = Math.max(0, Math.min(1, val));
     } else if (value.startsWith('<=')) {
-      options.maxConfidence = parseFloat(value.substring(2));
+      const val = parseFloat(value.substring(2));
+      if (!isNaN(val)) options.maxConfidence = Math.max(0, Math.min(1, val));
     } else if (value.startsWith('>')) {
-      options.minConfidence = parseFloat(value.substring(1));
+      const val = parseFloat(value.substring(1));
+      if (!isNaN(val)) options.minConfidence = Math.max(0, Math.min(1, val));
     } else if (value.startsWith('<')) {
-      options.maxConfidence = parseFloat(value.substring(1));
+      const val = parseFloat(value.substring(1));
+      if (!isNaN(val)) options.maxConfidence = Math.max(0, Math.min(1, val));
     }
   }
 

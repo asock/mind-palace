@@ -47,11 +47,11 @@ export class ConfigManager {
   }
 
   /**
-   * Ensure config directory exists
+   * Ensure config directory exists with proper permissions
    */
   private ensureDir(): void {
     if (!fs.existsSync(this.configDir)) {
-      fs.mkdirSync(this.configDir, { recursive: true });
+      fs.mkdirSync(this.configDir, { recursive: true, mode: 0o700 });
     }
   }
 
@@ -115,11 +115,14 @@ export class ConfigManager {
   }
 
   /**
-   * Save config to file
+   * Save config to file with secure permissions
    */
   private saveConfig(config: MindPalaceConfig): void {
     this.ensureDir();
-    fs.writeFileSync(this.configPath, JSON.stringify(config, null, 2), 'utf-8');
+    fs.writeFileSync(this.configPath, JSON.stringify(config, null, 2), {
+      mode: 0o600,
+      encoding: 'utf-8',
+    });
   }
 
   /**
