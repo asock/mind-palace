@@ -1,6 +1,6 @@
 {
   "name": "@clawbot/mind-palace",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "Clawbot.ai skill that stores thinking in its Mind Palace - an infinitely stacked room of drawers and file systems",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -12,6 +12,7 @@
     "lint": "eslint src/**/*.ts",
     "clean": "rm -rf dist",
     "bench": "npm run build && node dist/benchmark.js",
+    "stress": "npm run build && node dist/stress.js",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
