@@ -1,6 +1,14 @@
 import fs from 'fs';
 import path from 'path';
 import { MindPalaceConfig, DEFAULT_CONFIG } from '../types';
+import { isSafeObject } from '../storage/validation';
+
+/**
+ * Validate that a loaded config object is safe (no prototype pollution, bounded depth).
+ */
+function isSafeConfig(obj: unknown): boolean {
+  return isSafeObject(obj);
+}
 
 /**
  * Deep merge two objects. Source values override target values.
@@ -65,6 +73,10 @@ export class ConfigManager {
       try {
         const data = fs.readFileSync(this.configPath, 'utf-8');
         const saved = JSON.parse(data);
+        if (!isSafeConfig(saved)) {
+          console.warn('Config contains unsafe keys or excessive depth. Using defaults.');
+          return deepMerge({} as MindPalaceConfig, DEFAULT_CONFIG);
+        }
         return deepMerge(DEFAULT_CONFIG, saved);
       } catch (error) {
         console.warn(`Failed to load config: ${error}. Using defaults.`);

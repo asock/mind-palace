@@ -232,6 +232,15 @@ export class MindPalace {
   }
 
   /**
+   * Rebuild the SQLite index from the JSONL source of truth.
+   * Use this to recover from a corrupted or deleted DB file.
+   */
+  public async rebuildIndex(): Promise<number> {
+    await this.initialize();
+    return this.storage.rebuildIndex();
+  }
+
+  /**
    * Close Mind Palace
    */
   public close(): void {
@@ -268,6 +277,13 @@ export { encrypt, decrypt, getEncryptionKey } from './storage/encryption';
 
 // Export validation utilities (v2.1)
 export { safeParseThought, validateThought, isSafeObject } from './storage/validation';
+
+// Export embedding utilities (v0.3)
+export { embed, cosineSimilarity, tokenize } from './search/embeddings';
+
+// Export structured logger (v0.4)
+export { logger } from './logger';
+export type { LogLevel } from './logger';
 
 // Export singleton instance
 export const mindPalace = new MindPalace();

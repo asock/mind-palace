@@ -322,6 +322,42 @@ export class StorageManager {
   }
 
   /**
+   * Rebuild the SQLite index from the JSONL source-of-truth log.
+   * Use this to recover from a corrupted or deleted DB file.
+   * Returns the number of thoughts re-indexed.
+   */
+  public async rebuildIndex(): Promise<number> {
+    const db = this.getDb();
+
+    await new Promise<void>((resolve, reject) => {
+      db.serialize(() => {
+        db.run('DELETE FROM thought_tags');
+        db.run('DELETE FROM thought_references');
+        db.run('DELETE FROM thought_embeddings');
+        db.run('DELETE FROM thoughts', (err) => (err ? reject(err) : resolve()));
+      });
+    });
+
+    const thoughts = await this.readAllFromJSONL();
+    // Last-write-wins: latest entry per id
+    const latest = new Map<string, Thought>();
+    for (const t of thoughts) {
+      latest.set(t.id, this.maybeDecryptThought(t));
+    }
+
+    let reindexed = 0;
+    for (const thought of latest.values()) {
+      await this.indexThought(thought);
+      if (!thought.compressed && !thought.encrypted) {
+        await this.storeEmbedding(thought.id, thought.content).catch(() => {});
+      }
+      reindexed++;
+    }
+
+    return reindexed;
+  }
+
+  /**
    * Generate and persist embeddings for any thoughts missing them.
    * Useful after enabling vector search or importing external data.
    */

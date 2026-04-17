@@ -64,6 +64,14 @@ export class CLICommandHandler {
         return await this.handleMetrics();
       }
 
+      if (args.rebuild) {
+        return await this.handleRebuild();
+      }
+
+      if (args.backfill) {
+        return await this.handleBackfill();
+      }
+
       // Default: search
       return await this.handleSearch(args);
     } catch (error) {
@@ -173,6 +181,18 @@ export class CLICommandHandler {
 
       if (part === '--metrics') {
         args.metrics = true;
+        i++;
+        continue;
+      }
+
+      if (part === '--rebuild') {
+        args.rebuild = true;
+        i++;
+        continue;
+      }
+
+      if (part === '--backfill') {
+        args.backfill = true;
         i++;
         continue;
       }
@@ -632,6 +652,32 @@ Search latency:  ${m.performance.searchLatencyMs.toFixed(2)}ms
     }
   }
 
+  /**
+   * Rebuild SQLite index from JSONL source of truth.
+   */
+  private static async handleRebuild(): Promise<string> {
+    try {
+      const storage = getStorageManager();
+      const count = await storage.rebuildIndex();
+      return `✅ Rebuilt index from JSONL: ${count} thought${count === 1 ? '' : 's'} reindexed`;
+    } catch (error) {
+      return `❌ Rebuild failed: ${error instanceof Error ? error.message : 'Unknown'}`;
+    }
+  }
+
+  /**
+   * Backfill embeddings for thoughts missing them.
+   */
+  private static async handleBackfill(): Promise<string> {
+    try {
+      const storage = getStorageManager();
+      const count = await storage.backfillEmbeddings();
+      return `✅ Generated ${count} embedding${count === 1 ? '' : 's'}`;
+    } catch (error) {
+      return `❌ Backfill failed: ${error instanceof Error ? error.message : 'Unknown'}`;
+    }
+  }
+
   private static async handleClear(): Promise<string> {
     const storage = getStorageManager();
     const config = getConfigManager();
@@ -736,6 +782,8 @@ STATS & STORAGE:
   !mindpalace --compact                         # Compact JSONL (remove old versions)
   !mindpalace --manifest                        # Write SHA-256 integrity manifest
   !mindpalace --verify                          # Verify against manifest
+  !mindpalace --rebuild                         # Rebuild DB from JSONL (recovery)
+  !mindpalace --backfill                        # Generate missing embeddings
   !mindpalace --clear                           # Delete all thoughts
   !mindpalace --export [path]                   # Export to JSON
   !mindpalace --import <path>                   # Import from JSON
