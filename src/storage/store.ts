@@ -8,6 +8,7 @@ import { compress, decompress, shouldCompress } from './compression';
 import { getConfigManager } from '../config/config';
 import { safeParseThought } from './validation';
 import { encrypt, decrypt, getEncryptionKey } from './encryption';
+import { embed, vectorToBuffer, bufferToVector, cosineSimilarity, DEFAULT_DIMENSION } from '../search/embeddings';
 
 /**
  * Storage manager for Mind Palace
@@ -171,6 +172,14 @@ export class StorageManager {
     await this.indexThought(thought);
     try {
       await this.saveToJSONL(thought);
+      await this.storeEmbedding(id, content).catch((err) =>
+        console.warn(`Failed to store embedding for ${id}:`, err)
+      );
+      if (options.references && options.references.length > 0) {
+        await this.storeReferences(id, options.references).catch((err) =>
+          console.warn(`Failed to store references for ${id}:`, err)
+        );
+      }
     } catch (jsonlErr) {
       await this.deleteThoughtIndex(id).catch((err) =>
         console.error(`Failed to rollback index for ${id}:`, err)
@@ -179,6 +188,123 @@ export class StorageManager {
     }
 
     return thought;
+  }
+
+  /**
+   * Store embedding vector for a thought in SQLite BLOB table.
+   */
+  public async storeEmbedding(thoughtId: string, content: string): Promise<void> {
+    const db = this.getDb();
+    const vec = embed(content, DEFAULT_DIMENSION);
+    const buf = vectorToBuffer(vec);
+
+    return new Promise((resolve, reject) => {
+      db.run(
+        `INSERT OR REPLACE INTO thought_embeddings (thought_id, embedding) VALUES (?, ?)`,
+        [thoughtId, buf],
+        (err) => {
+          if (err) reject(err);
+          else resolve();
+        }
+      );
+    });
+  }
+
+  /**
+   * Store references (forward links) between thoughts for thinking chains.
+   */
+  public async storeReferences(sourceId: string, targetIds: string[]): Promise<void> {
+    const db = this.getDb();
+
+    return new Promise((resolve, reject) => {
+      let completed = 0;
+      let error: Error | null = null;
+      if (targetIds.length === 0) return resolve();
+
+      for (const targetId of targetIds) {
+        db.run(
+          `INSERT OR IGNORE INTO thought_references (source_id, target_id) VALUES (?, ?)`,
+          [sourceId, targetId],
+          (err: Error | null) => {
+            if (err && !error) error = err;
+            completed++;
+            if (completed === targetIds.length) {
+              if (error) reject(error);
+              else resolve();
+            }
+          }
+        );
+      }
+    });
+  }
+
+  /**
+   * Get all thought IDs referenced by a source thought (forward chain).
+   */
+  public async getReferences(sourceId: string): Promise<string[]> {
+    const db = this.getDb();
+    return new Promise((resolve, reject) => {
+      db.all(
+        `SELECT target_id FROM thought_references WHERE source_id = ?`,
+        [sourceId],
+        (err, rows: any[]) => {
+          if (err) reject(err);
+          else resolve((rows || []).map((r) => r.target_id));
+        }
+      );
+    });
+  }
+
+  /**
+   * Get all thought IDs that reference the target (backward chain / backlinks).
+   */
+  public async getBacklinks(targetId: string): Promise<string[]> {
+    const db = this.getDb();
+    return new Promise((resolve, reject) => {
+      db.all(
+        `SELECT source_id FROM thought_references WHERE target_id = ?`,
+        [targetId],
+        (err, rows: any[]) => {
+          if (err) reject(err);
+          else resolve((rows || []).map((r) => r.source_id));
+        }
+      );
+    });
+  }
+
+  /**
+   * Vector similarity search using stored embeddings.
+   * Returns thought IDs ranked by cosine similarity (highest first).
+   */
+  public async vectorSearch(
+    queryText: string,
+    topK: number = 10
+  ): Promise<Array<{ id: string; score: number }>> {
+    const db = this.getDb();
+    const queryVec = embed(queryText, DEFAULT_DIMENSION);
+
+    const rows: Array<{ thought_id: string; embedding: Buffer }> = await new Promise(
+      (resolve, reject) => {
+        db.all(
+          `SELECT thought_id, embedding FROM thought_embeddings`,
+          (err, rows: any[]) => {
+            if (err) reject(err);
+            else resolve(rows || []);
+          }
+        );
+      }
+    );
+
+    const scored = rows
+      .map((row) => ({
+        id: row.thought_id,
+        score: cosineSimilarity(queryVec, bufferToVector(row.embedding)),
+      }))
+      .filter((r) => r.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, Math.max(1, topK));
+
+    return scored;
   }
 
   /**
@@ -193,6 +319,33 @@ export class StorageManager {
         else resolve();
       });
     });
+  }
+
+  /**
+   * Generate and persist embeddings for any thoughts missing them.
+   * Useful after enabling vector search or importing external data.
+   */
+  public async backfillEmbeddings(): Promise<number> {
+    const db = this.getDb();
+
+    const existingIds: Set<string> = await new Promise((resolve, reject) => {
+      db.all(`SELECT thought_id FROM thought_embeddings`, (err, rows: any[]) => {
+        if (err) reject(err);
+        else resolve(new Set((rows || []).map((r) => r.thought_id)));
+      });
+    });
+
+    const thoughts = await this.getAllThoughts(100000, 0);
+    let indexed = 0;
+
+    for (const thought of thoughts) {
+      if (existingIds.has(thought.id)) continue;
+      if (thought.compressed || thought.encrypted) continue;
+      await this.storeEmbedding(thought.id, thought.content);
+      indexed++;
+    }
+
+    return indexed;
   }
 
   /**

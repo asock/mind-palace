@@ -68,13 +68,39 @@ export class SearchAPI {
   }
 
   /**
-   * Semantic search
+   * Semantic search using persisted vector embeddings when available,
+   * falling back to token-based similarity otherwise.
    */
   static async semanticSearch(
     query: string,
     thoughts: Thought[],
     sensitivity: number = 0.75
   ): Promise<SearchResult> {
+    const startTime = performance.now();
+    const storage = getStorageManager();
+
+    try {
+      const ranked = await storage.vectorSearch(query, 100);
+      if (ranked.length > 0) {
+        const byId = new Map(thoughts.map((t) => [t.id, t]));
+        const minScore = 1 - sensitivity;
+        const hits = ranked
+          .filter((r) => r.score >= minScore && byId.has(r.id))
+          .map((r) => ({ thought: byId.get(r.id)!, score: r.score }));
+
+        return {
+          thoughts: hits.map((h) => h.thought),
+          count: hits.length,
+          totalMatches: thoughts.length,
+          scores: Object.fromEntries(hits.map((h) => [h.thought.id, h.score])),
+          executionTime: performance.now() - startTime,
+          searchType: 'semantic',
+        };
+      }
+    } catch (err) {
+      console.warn('Vector search failed, falling back to token similarity:', err);
+    }
+
     return SemanticSearchEngine.searchSimilar(query, thoughts);
   }
 

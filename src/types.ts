@@ -135,6 +135,7 @@ export interface CaptureOptions {
   userQuery?: string;
   conversationId?: string;
   modelVersion?: string;
+  references?: string[]; // IDs of thoughts this one builds on
 }
 
 /**

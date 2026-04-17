@@ -10,6 +10,7 @@ import { SearchAPI } from './search/search';
 import { CLICommandHandler } from './commands/cli';
 import { AutoRetrieval } from './retrieval/auto-retrieval';
 import { CompressionManager } from './storage/compression-manager';
+import { OperationsManager } from './storage/operations';
 import * as types from './types';
 
 /**
@@ -189,6 +190,48 @@ export class MindPalace {
   }
 
   /**
+   * Compact the JSONL log (remove superseded versions).
+   */
+  public async compact(): Promise<ReturnType<typeof OperationsManager.compactJSONL>> {
+    await this.initialize();
+    return OperationsManager.compactJSONL();
+  }
+
+  /**
+   * Write a SHA-256 manifest of all storage files.
+   */
+  public async writeManifest(): Promise<ReturnType<typeof OperationsManager.writeBackupManifest>> {
+    await this.initialize();
+    return OperationsManager.writeBackupManifest();
+  }
+
+  /**
+   * Verify storage files against a manifest.
+   */
+  public async verifyManifest(manifestPath?: string): Promise<
+    Array<{ file: string; expected: string; actual: string | null }>
+  > {
+    await this.initialize();
+    return OperationsManager.verifyBackupManifest(manifestPath);
+  }
+
+  /**
+   * Collect observability metrics snapshot.
+   */
+  public async metrics(): Promise<ReturnType<typeof OperationsManager.collectMetrics>> {
+    await this.initialize();
+    return OperationsManager.collectMetrics();
+  }
+
+  /**
+   * Backfill embeddings for thoughts missing them.
+   */
+  public async backfillEmbeddings(): Promise<number> {
+    await this.initialize();
+    return this.storage.backfillEmbeddings();
+  }
+
+  /**
    * Close Mind Palace
    */
   public close(): void {
@@ -209,6 +252,7 @@ export { SearchAPI };
 export { CLICommandHandler };
 export { AutoRetrieval };
 export { CompressionManager };
+export { OperationsManager };
 
 // Export search engines
 export { KeywordSearchEngine } from './search/keyword';

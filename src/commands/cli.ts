@@ -5,6 +5,7 @@ import { ThoughtCapturer } from '../capture/capturer';
 import { getConfigManager } from '../config/config';
 import { getStorageManager } from '../storage/store';
 import { CompressionManager } from '../storage/compression-manager';
+import { OperationsManager } from '../storage/operations';
 import { SearchResult } from '../types';
 
 /**
@@ -45,6 +46,22 @@ export class CLICommandHandler {
 
       if (args.import) {
         return await this.handleImport(args);
+      }
+
+      if (args.compact) {
+        return await this.handleCompact();
+      }
+
+      if (args.manifest) {
+        return await this.handleManifest();
+      }
+
+      if (args.verify) {
+        return await this.handleVerify();
+      }
+
+      if (args.metrics) {
+        return await this.handleMetrics();
       }
 
       // Default: search
@@ -132,6 +149,30 @@ export class CLICommandHandler {
         } else {
           args.import = '';
         }
+        i++;
+        continue;
+      }
+
+      if (part === '--compact') {
+        args.compact = true;
+        i++;
+        continue;
+      }
+
+      if (part === '--manifest') {
+        args.manifest = true;
+        i++;
+        continue;
+      }
+
+      if (part === '--verify') {
+        args.verify = true;
+        i++;
+        continue;
+      }
+
+      if (part === '--metrics') {
+        args.metrics = true;
         i++;
         continue;
       }
@@ -527,6 +568,70 @@ Potential Savings:     ${CompressionManager.formatBytes(compressionStats.savings
     }
   }
 
+  /**
+   * Compact the JSONL log (remove superseded versions).
+   */
+  private static async handleCompact(): Promise<string> {
+    try {
+      const { removedLines, beforeBytes, afterBytes } = await OperationsManager.compactJSONL();
+      return `✅ Compacted JSONL: removed ${removedLines} lines, ${CompressionManager.formatBytes(beforeBytes)} → ${CompressionManager.formatBytes(afterBytes)}`;
+    } catch (error) {
+      return `❌ Compaction failed: ${error instanceof Error ? error.message : 'Unknown'}`;
+    }
+  }
+
+  /**
+   * Write a SHA-256 manifest of storage files.
+   */
+  private static async handleManifest(): Promise<string> {
+    try {
+      const { path: mPath, files } = await OperationsManager.writeBackupManifest();
+      const entries = Object.entries(files)
+        .map(([name, hash]) => `  ${name}: ${hash.substring(0, 16)}...`)
+        .join('\n');
+      return `✅ Manifest written to ${mPath}\n${entries}`;
+    } catch (error) {
+      return `❌ Manifest write failed: ${error instanceof Error ? error.message : 'Unknown'}`;
+    }
+  }
+
+  /**
+   * Verify storage files against a manifest.
+   */
+  private static async handleVerify(): Promise<string> {
+    try {
+      const mismatches = await OperationsManager.verifyBackupManifest();
+      if (mismatches.length === 0) {
+        return '✅ All storage files verified against manifest';
+      }
+      const lines = mismatches
+        .map((m) => `  ${m.file}: ${m.actual ? 'CORRUPTED' : 'MISSING'}`)
+        .join('\n');
+      return `❌ ${mismatches.length} mismatch(es):\n${lines}`;
+    } catch (error) {
+      return `❌ Verification failed: ${error instanceof Error ? error.message : 'Unknown'}`;
+    }
+  }
+
+  /**
+   * Show operational metrics snapshot.
+   */
+  private static async handleMetrics(): Promise<string> {
+    try {
+      const m = await OperationsManager.collectMetrics();
+      return `
+📈 Mind Palace Metrics
+━━━━━━━━━━━━━━━━━━━━━━
+Thoughts:        ${m.thoughts.total} total (${m.thoughts.compressed} compressed, ${m.thoughts.encrypted} encrypted)
+Storage:         JSONL ${CompressionManager.formatBytes(m.storage.jsonlBytes)} | DB ${CompressionManager.formatBytes(m.storage.dbBytes)}
+Capture latency: ${m.performance.captureLatencyMs.toFixed(2)}ms
+Search latency:  ${m.performance.searchLatencyMs.toFixed(2)}ms
+      `.trim();
+    } catch (error) {
+      return `❌ Metrics collection failed: ${error instanceof Error ? error.message : 'Unknown'}`;
+    }
+  }
+
   private static async handleClear(): Promise<string> {
     const storage = getStorageManager();
     const config = getConfigManager();
@@ -627,6 +732,10 @@ CONFIG:
 STATS & STORAGE:
   !mindpalace --stats                           # Show statistics
   !mindpalace --stats --compression             # Include compression stats
+  !mindpalace --metrics                         # Operational metrics + latency
+  !mindpalace --compact                         # Compact JSONL (remove old versions)
+  !mindpalace --manifest                        # Write SHA-256 integrity manifest
+  !mindpalace --verify                          # Verify against manifest
   !mindpalace --clear                           # Delete all thoughts
   !mindpalace --export [path]                   # Export to JSON
   !mindpalace --import <path>                   # Import from JSON
