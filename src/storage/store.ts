@@ -128,7 +128,9 @@ export class StorageManager {
   }
 
   /**
-   * Capture a new thought
+   * Capture a new thought with transactional safety.
+   * SQLite index is committed first; if JSONL append fails, the index entry
+   * is rolled back to keep storage consistent.
    */
   public async capture(
     content: string,
@@ -162,10 +164,32 @@ export class StorageManager {
       version: 1,
     };
 
-    await this.saveToJSONL(thought);
+    // Index first, then write to JSONL. Rollback index if JSONL fails.
     await this.indexThought(thought);
+    try {
+      await this.saveToJSONL(thought);
+    } catch (jsonlErr) {
+      await this.deleteThoughtIndex(id).catch((err) =>
+        console.error(`Failed to rollback index for ${id}:`, err)
+      );
+      throw jsonlErr;
+    }
 
     return thought;
+  }
+
+  /**
+   * Delete thought index entries (used for transaction rollback)
+   */
+  private async deleteThoughtIndex(id: string): Promise<void> {
+    const db = this.getDb();
+
+    return new Promise((resolve, reject) => {
+      db.run(`DELETE FROM thoughts WHERE id = ?`, [id], (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
   }
 
   /**
@@ -491,6 +515,27 @@ export class StorageManager {
     thought.content = content;
     await this.saveToJSONL(thought);
     await this.updateThought(thought);
+  }
+
+  /**
+   * Delete a thought from both the SQLite index and the JSONL file.
+   * JSONL is rewritten without the target thought.
+   */
+  public async deleteThought(id: string): Promise<void> {
+    await this.deleteThoughtIndex(id);
+
+    if (!fs.existsSync(this.jsonlPath)) return;
+
+    const thoughts = await this.readAllFromJSONL();
+    const remaining = thoughts.filter((t) => t.id !== id);
+    const serialized = remaining.map((t) => JSON.stringify(t)).join('\n') + (remaining.length ? '\n' : '');
+
+    return new Promise((resolve, reject) => {
+      fs.writeFile(this.jsonlPath, serialized, { mode: 0o600 }, (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
   }
 
   /**

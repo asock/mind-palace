@@ -1,6 +1,6 @@
 {
   "name": "@clawbot/mind-palace",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Clawbot.ai skill that stores thinking in its Mind Palace - an infinitely stacked room of drawers and file systems",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
