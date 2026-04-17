@@ -289,5 +289,8 @@ export type { LogLevel } from './logger';
 export { startServer } from './server/http';
 export type { ServerOptions, ServerHandle } from './server/http';
 
+// Export graceful shutdown (v1.3)
+export { installShutdownHandlers } from './shutdown';
+
 // Export singleton instance
 export const mindPalace = new MindPalace();
