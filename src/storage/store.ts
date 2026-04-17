@@ -29,15 +29,38 @@ export class StorageManager {
   }
 
   /**
-   * Initialize storage (create tables, indexes)
+   * Initialize storage (create tables, indexes).
+   * Enables WAL mode for concurrent readers and faster writes.
    */
   public async initialize(): Promise<void> {
     if (this.initialized) return;
 
     await this.ensureDir();
     this.db = new sqlite3.Database(this.dbPath);
+    await this.applyPragmas();
     await this.createTables();
     this.initialized = true;
+  }
+
+  /**
+   * Apply performance pragmas. WAL mode allows concurrent reads during writes
+   * and batches fsyncs; NORMAL synchronous is safe with WAL.
+   */
+  private async applyPragmas(): Promise<void> {
+    const db = this.getDb();
+    const pragmas = [
+      'PRAGMA journal_mode = WAL',
+      'PRAGMA synchronous = NORMAL',
+      'PRAGMA temp_store = MEMORY',
+      'PRAGMA foreign_keys = ON',
+      'PRAGMA cache_size = -20000', // 20 MiB page cache
+    ];
+
+    for (const pragma of pragmas) {
+      await new Promise<void>((resolve, reject) => {
+        db.run(pragma, (err) => (err ? reject(err) : resolve()));
+      });
+    }
   }
 
   private getDb(): sqlite3.Database {
