@@ -285,5 +285,9 @@ export { embed, cosineSimilarity, tokenize } from './search/embeddings';
 export { logger } from './logger';
 export type { LogLevel } from './logger';
 
+// Export HTTP server (v1.1)
+export { startServer } from './server/http';
+export type { ServerOptions, ServerHandle } from './server/http';
+
 // Export singleton instance
 export const mindPalace = new MindPalace();
