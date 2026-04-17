@@ -42,6 +42,7 @@ export interface Thought {
   source?: ThoughtSource;
   compressed: boolean;
   version: number;
+  encrypted?: boolean; // Set when content is AES-256-GCM ciphertext
 }
 
 /**
@@ -78,6 +79,7 @@ export interface MindPalaceConfig {
     compression: CompressionType;
     batchInterval: number; // seconds
     maxStorageAge: number; // seconds
+    encryption: boolean; // AES-256-GCM at-rest encryption
   };
   search: {
     enableVectorSearch: boolean;
@@ -106,6 +108,7 @@ export const DEFAULT_CONFIG: MindPalaceConfig = {
     compression: 'lz4',
     batchInterval: 3600,
     maxStorageAge: 157680000, // 5 years
+    encryption: false, // opt-in; requires stable MIND_PALACE_KEY or persistent keyfile
   },
   search: {
     enableVectorSearch: true,

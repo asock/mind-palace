@@ -219,5 +219,11 @@ export { SemanticSearchEngine } from './search/semantic';
 // Export compression utilities
 export { compress, decompress } from './storage/compression';
 
+// Export encryption utilities (v2.1)
+export { encrypt, decrypt, getEncryptionKey } from './storage/encryption';
+
+// Export validation utilities (v2.1)
+export { safeParseThought, validateThought, isSafeObject } from './storage/validation';
+
 // Export singleton instance
 export const mindPalace = new MindPalace();

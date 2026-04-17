@@ -39,6 +39,14 @@ export class CLICommandHandler {
         return await this.handleClear();
       }
 
+      if (args.export) {
+        return await this.handleExport(args);
+      }
+
+      if (args.import) {
+        return await this.handleImport(args);
+      }
+
       // Default: search
       return await this.handleSearch(args);
     } catch (error) {
@@ -104,6 +112,26 @@ export class CLICommandHandler {
 
       if (part === '--clear') {
         args.clear = true;
+        i++;
+        continue;
+      }
+
+      if (part === '--export') {
+        if (i + 1 < parts.length && !parts[i + 1].startsWith('-')) {
+          args.export = this.stripQuotes(parts[++i]);
+        } else {
+          args.export = '';
+        }
+        i++;
+        continue;
+      }
+
+      if (part === '--import') {
+        if (i + 1 < parts.length && !parts[i + 1].startsWith('-')) {
+          args.import = this.stripQuotes(parts[++i]);
+        } else {
+          args.import = '';
+        }
         i++;
         continue;
       }
@@ -418,6 +446,87 @@ Potential Savings:     ${CompressionManager.formatBytes(compressionStats.savings
     return output.trim();
   }
 
+  /**
+   * Export all thoughts to a JSON file.
+   * Decrypted content is written in cleartext — write to a secure path.
+   */
+  private static async handleExport(args: Record<string, any>): Promise<string> {
+    const storage = getStorageManager();
+    const configMgr = getConfigManager();
+    const defaultPath = path.join(
+      configMgr.getStorageDir(),
+      `mind-palace-export-${Date.now()}.json`
+    );
+    const targetPath = (args.export || defaultPath).trim() || defaultPath;
+
+    try {
+      const thoughts = await storage.getAllThoughts(1000000, 0);
+      const payload = JSON.stringify(
+        { version: 1, exportedAt: new Date().toISOString(), thoughts },
+        null,
+        2
+      );
+      fs.writeFileSync(targetPath, payload, { mode: 0o600 });
+      return `✅ Exported ${thoughts.length} thought${thoughts.length === 1 ? '' : 's'} to ${targetPath}`;
+    } catch (error) {
+      return `❌ Export failed: ${error instanceof Error ? error.message : 'Unknown error'}`;
+    }
+  }
+
+  /**
+   * Import thoughts from a JSON file produced by --export.
+   * Skips thoughts whose IDs already exist.
+   */
+  private static async handleImport(args: Record<string, any>): Promise<string> {
+    const sourcePath = (args.import || '').trim();
+    if (!sourcePath) {
+      return '❌ Import requires a file path: !mindpalace --import <path>';
+    }
+
+    if (!fs.existsSync(sourcePath)) {
+      return `❌ Import file not found: ${sourcePath}`;
+    }
+
+    try {
+      const raw = fs.readFileSync(sourcePath, 'utf-8');
+      const parsed = JSON.parse(raw);
+      const thoughts = Array.isArray(parsed) ? parsed : parsed.thoughts;
+
+      if (!Array.isArray(thoughts)) {
+        return '❌ Import file must contain an array or { thoughts: [...] }';
+      }
+
+      const storage = getStorageManager();
+      let imported = 0;
+      let skipped = 0;
+
+      for (const t of thoughts) {
+        const existing = await storage.getThought(t.id);
+        if (existing) {
+          skipped++;
+          continue;
+        }
+
+        await ThoughtCapturer.capture(t.content, {
+          topic: t.metadata?.topic,
+          confidence: t.metadata?.confidence,
+          tags: t.metadata?.tags,
+          category: t.metadata?.category,
+          emotionalTone: t.metadata?.emotionalTone,
+          domain: t.source?.domain,
+          userQuery: t.source?.userQuery,
+          conversationId: t.source?.conversation,
+          modelVersion: t.metadata?.modelVersion,
+        });
+        imported++;
+      }
+
+      return `✅ Imported ${imported} thoughts (skipped ${skipped} duplicates)`;
+    } catch (error) {
+      return `❌ Import failed: ${error instanceof Error ? error.message : 'Unknown error'}`;
+    }
+  }
+
   private static async handleClear(): Promise<string> {
     const storage = getStorageManager();
     const config = getConfigManager();
@@ -518,6 +627,9 @@ CONFIG:
 STATS & STORAGE:
   !mindpalace --stats                           # Show statistics
   !mindpalace --stats --compression             # Include compression stats
+  !mindpalace --clear                           # Delete all thoughts
+  !mindpalace --export [path]                   # Export to JSON
+  !mindpalace --import <path>                   # Import from JSON
   !mindpalace --help                            # Show this help
 
 AUTO-RETRIEVAL:

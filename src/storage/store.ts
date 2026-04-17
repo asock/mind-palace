@@ -1,10 +1,13 @@
 import fs from 'fs';
+import readline from 'readline';
 import path from 'path';
 import sqlite3 from 'sqlite3';
 import { v4 as uuidv4 } from 'uuid';
 import { Thought, CaptureOptions, ThoughtMetadata, DEFAULT_CONFIG } from '../types';
 import { compress, decompress, shouldCompress } from './compression';
 import { getConfigManager } from '../config/config';
+import { safeParseThought } from './validation';
+import { encrypt, decrypt, getEncryptionKey } from './encryption';
 
 /**
  * Storage manager for Mind Palace
@@ -193,16 +196,72 @@ export class StorageManager {
   }
 
   /**
-   * Save thought to JSONL file
+   * Save thought to JSONL file (encrypts content if enabled).
    */
   private async saveToJSONL(thought: Thought): Promise<void> {
+    const toPersist = this.maybeEncryptThought(thought);
     return new Promise((resolve, reject) => {
-      const jsonLine = JSON.stringify(thought) + '\n';
-      fs.appendFile(this.jsonlPath, jsonLine, (err) => {
+      const jsonLine = JSON.stringify(toPersist) + '\n';
+      fs.appendFile(this.jsonlPath, jsonLine, { mode: 0o600 }, (err) => {
         if (err) reject(err);
         else resolve();
       });
     });
+  }
+
+  /**
+   * Encrypt thought.content if encryption is enabled.
+   * Marks the thought with `encrypted: true` so decryption is symmetric.
+   */
+  private maybeEncryptThought(thought: Thought): Thought {
+    const config = getConfigManager().getConfig();
+    if (!config.storage.encryption || thought.encrypted) return thought;
+
+    try {
+      const key = getEncryptionKey(this.storageDir);
+      return { ...thought, content: encrypt(thought.content, key), encrypted: true };
+    } catch (error) {
+      console.error(`Failed to encrypt thought ${thought.id}:`, error);
+      return thought;
+    }
+  }
+
+  /**
+   * Decrypt thought.content if it was stored encrypted.
+   */
+  private maybeDecryptThought(thought: Thought): Thought {
+    if (!thought.encrypted) return thought;
+
+    try {
+      const key = getEncryptionKey(this.storageDir);
+      return { ...thought, content: decrypt(thought.content, key), encrypted: false };
+    } catch (error) {
+      console.error(`Failed to decrypt thought ${thought.id}:`, error);
+      return thought;
+    }
+  }
+
+  /**
+   * Stream JSONL file line-by-line. Yields validated Thought objects.
+   * Use this instead of readAllFromJSONL when memory efficiency matters.
+   */
+  public async *streamThoughts(): AsyncGenerator<Thought, void, void> {
+    if (!fs.existsSync(this.jsonlPath)) return;
+
+    const stream = fs.createReadStream(this.jsonlPath, { encoding: 'utf-8' });
+    const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+
+    try {
+      for await (const line of rl) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        const thought = safeParseThought(trimmed);
+        if (thought) yield this.maybeDecryptThought(thought);
+      }
+    } finally {
+      rl.close();
+      stream.close();
+    }
   }
 
   /**
@@ -299,11 +358,16 @@ export class StorageManager {
   }
 
   /**
-   * Get thought by ID - reads from JSONL
+   * Get thought by ID - reads from JSONL.
+   * Returns the LATEST version (last write wins for append-only updates).
    */
   public async getThought(id: string): Promise<Thought | null> {
     const thoughts = await this.readAllFromJSONL();
-    return thoughts.find((t) => t.id === id) || null;
+    let latest: Thought | null = null;
+    for (const t of thoughts) {
+      if (t.id === id) latest = t;
+    }
+    return latest;
   }
 
   /**
@@ -332,13 +396,12 @@ export class StorageManager {
         for (let i = 0; i < lines.length; i++) {
           const trimmed = lines[i].trim();
           if (!trimmed) continue;
-          try {
-            thoughts.push(JSON.parse(trimmed));
-          } catch (error) {
+          const thought = safeParseThought(trimmed);
+          if (thought) {
+            thoughts.push(this.maybeDecryptThought(thought));
+          } else {
             invalidCount++;
-            console.warn(
-              `Failed to parse JSONL line ${i + 1}: ${error instanceof Error ? error.message : String(error)}`
-            );
+            console.warn(`Invalid/unsafe JSONL line ${i + 1} skipped`);
           }
         }
         if (invalidCount > 0) {
@@ -450,9 +513,18 @@ export class StorageManager {
   }
 
   /**
-   * Update an existing thought (for compression, etc.)
+   * Update an existing thought. Appends a new version to JSONL (append-only log)
+   * and updates the SQLite index. Readers return the latest version.
    */
   public async updateThought(thought: Thought): Promise<void> {
+    await this.saveToJSONL(thought);
+    await this.updateThoughtIndex(thought);
+  }
+
+  /**
+   * Update only the SQLite index entry for a thought.
+   */
+  private async updateThoughtIndex(thought: Thought): Promise<void> {
     const db = this.getDb();
 
     return new Promise((resolve, reject) => {
